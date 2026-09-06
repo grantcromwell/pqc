@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+build-cmake/
+dist/
+.venv/
+.ci/
+*.qpe
+*.qpe.json
+*.pem
+*.key
+*.sig
+Cryptographic Module Validation Program _ CSRC.pdf
+
+.github/
