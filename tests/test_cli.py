@@ -16,6 +16,10 @@ class CLITests(unittest.TestCase):
         self.assertTrue(report["provider"]["ml_kem_1024"])
         self.assertTrue(report["provider"]["ml_dsa_87"])
         self.assertTrue(report["provider"]["algorithm_self_tests_passed"])
+        self.assertEqual(
+            report["provider"]["nist_acvp_revision"],
+            "975de31eb83d87039ec88934fdc47d8c312b892d",
+        )
         self.assertEqual(report["profile"]["suite"]["kem"], "ML-KEM-1024")
         self.assertEqual(report["profile"]["suite"]["signature"], "ML-DSA-87")
         self.assertNotIn("fips_target", report["profile"])

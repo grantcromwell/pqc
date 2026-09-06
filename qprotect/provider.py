@@ -7,6 +7,7 @@ against the same validated OpenSSL build/provider and keep the boundary audited.
 """
 from __future__ import annotations
 
+from base64 import b64encode
 from dataclasses import dataclass
 import hmac
 import os
@@ -22,6 +23,64 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from .constants import AEAD, Hash, KDF, KEM, Signature
 from .exceptions import ProviderError
 from .io_utils import atomic_write
+from . import nist_acvp_vectors as nist
+
+
+_ML_KEM_1024_OID = bytes.fromhex("608648016503040403")
+_ML_DSA_87_OID = bytes.fromhex("608648016503040313")
+
+
+def _der_length(length: int) -> bytes:
+    if length < 0:
+        raise ValueError("negative DER length")
+    if length < 128:
+        return bytes([length])
+    encoded = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(encoded)]) + encoded
+
+
+def _der_tlv(tag: int, value: bytes) -> bytes:
+    return bytes([tag]) + _der_length(len(value)) + value
+
+
+def _algorithm_identifier(oid: bytes) -> bytes:
+    return _der_tlv(0x30, _der_tlv(0x06, oid))
+
+
+def _subject_public_key_info(oid: bytes, raw_public_key: bytes) -> bytes:
+    return _der_tlv(
+        0x30,
+        _algorithm_identifier(oid) + _der_tlv(0x03, b"\x00" + raw_public_key),
+    )
+
+
+def _private_key_info(oid: bytes, raw_private_key: bytes) -> bytes:
+    # RFC 5958/PKCS#8 wrapping used by OpenSSL's FIPS 203/204 key decoders.
+    return _der_tlv(
+        0x30,
+        b"\x02\x01\x00"
+        + _algorithm_identifier(oid)
+        + _der_tlv(0x04, _der_tlv(0x04, raw_private_key)),
+    )
+
+
+def _pem(label: str, der: bytes) -> bytes:
+    payload = b64encode(der)
+    lines = [payload[offset:offset + 64] for offset in range(0, len(payload), 64)]
+    return (
+        f"-----BEGIN {label}-----\n".encode("ascii")
+        + b"\n".join(lines)
+        + f"\n-----END {label}-----\n".encode("ascii")
+    )
+
+
+def _extract_raw_from_der(encoded: bytes, template: bytes, raw_length: int) -> bytes:
+    if raw_length <= 0 or len(encoded) != len(template):
+        raise ProviderError("unexpected OpenSSL post-quantum key encoding")
+    prefix_length = len(template) - raw_length
+    if not hmac.compare_digest(encoded[:prefix_length], template[:prefix_length]):
+        raise ProviderError("unexpected OpenSSL post-quantum key encoding")
+    return encoded[prefix_length:]
 
 
 @dataclass(frozen=True)
@@ -33,6 +92,7 @@ class ProviderInfo:
     ml_dsa_87: bool
     algorithm_self_tests_passed: bool
     provider_names: tuple[str, ...]
+    nist_acvp_revision: str
 
 
 class OpenSSLProvider:
@@ -116,6 +176,7 @@ class OpenSSLProvider:
             ml_dsa_87="ML-DSA-87" in sigs,
             algorithm_self_tests_passed=self._self_tests_passed,
             provider_names=self.provider_names(),
+            nist_acvp_revision=nist.ACVP_REVISION,
         )
 
     def assert_ready(self) -> None:
@@ -154,6 +215,9 @@ class OpenSSLProvider:
         if self.aead_decrypt(key, nonce, ciphertext, tag, b"self-test") != b"qprotect":
             raise ProviderError("AES-256-GCM self-test failed")
 
+        self._run_nist_ml_kem_1024_kats()
+        self._run_nist_ml_dsa_87_kats()
+
         with tempfile.TemporaryDirectory(prefix="qprotect-algorithm-selftest-") as tmp:
             root = Path(tmp)
             kem_private, kem_public = root / "kem-private.pem", root / "kem-public.pem"
@@ -169,6 +233,139 @@ class OpenSSLProvider:
                 sig_public, b"qprotect self-test", signature
             ):
                 raise ProviderError("ML-DSA-87 pairwise self-test failed")
+
+    def _generate_seeded_key(self, algorithm: str, seed: bytes, output: Path) -> None:
+        self._run(
+            [
+                "genpkey",
+                "-algorithm",
+                algorithm,
+                "-pkeyopt",
+                f"hexseed:{seed.hex()}",
+                "-out",
+                output,
+            ]
+        )
+
+    def _raw_seeded_key_components(
+        self,
+        *,
+        algorithm: str,
+        oid: bytes,
+        seed: bytes,
+        public_length: int,
+        private_length: int,
+        provider_output_option: str,
+        root: Path,
+    ) -> tuple[bytes, bytes]:
+        private_pem = root / f"{algorithm.lower()}-seeded.pem"
+        self._generate_seeded_key(algorithm, seed, private_pem)
+        public_der = self._run(
+            ["pkey", "-in", private_pem, "-pubout", "-outform", "DER"]
+        ).stdout
+        private_der = self._run(
+            [
+                "pkey",
+                "-in",
+                private_pem,
+                "-provparam",
+                provider_output_option,
+                "-outform",
+                "DER",
+            ]
+        ).stdout
+        public_template = _subject_public_key_info(oid, bytes(public_length))
+        private_template = _private_key_info(oid, bytes(private_length))
+        return (
+            _extract_raw_from_der(public_der, public_template, public_length),
+            _extract_raw_from_der(private_der, private_template, private_length),
+        )
+
+    def _run_nist_ml_kem_1024_kats(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="qprotect-nist-ml-kem-kat-") as tmp:
+            root = Path(tmp)
+            public_key, private_key = self._raw_seeded_key_components(
+                algorithm="ML-KEM-1024",
+                oid=_ML_KEM_1024_OID,
+                seed=nist.ML_KEM_KEYGEN_SEED,
+                public_length=1568,
+                private_length=3168,
+                provider_output_option="ml-kem.output_formats=priv-only",
+                root=root,
+            )
+            if not hmac.compare_digest(
+                self.digest(public_key), nist.ML_KEM_KEYGEN_EK_SHA384
+            ) or not hmac.compare_digest(
+                self.digest(private_key), nist.ML_KEM_KEYGEN_DK_SHA384
+            ):
+                raise ProviderError("ML-KEM-1024 NIST FIPS 203 keyGen KAT failed")
+
+            public_pem = root / "nist-encapsulation-public.pem"
+            public_der = _subject_public_key_info(_ML_KEM_1024_OID, nist.ML_KEM_ENCAP_EK)
+            atomic_write(public_pem, _pem("PUBLIC KEY", public_der))
+            secret_path = root / "shared-secret.bin"
+            proc = self._run(
+                [
+                    "pkeyutl",
+                    "-encap",
+                    "-pubin",
+                    "-inkey",
+                    public_pem,
+                    "-pkeyopt",
+                    f"hexikme:{nist.ML_KEM_ENCAP_M.hex()}",
+                    "-secret",
+                    secret_path,
+                ]
+            )
+            shared_secret = secret_path.read_bytes()
+            if not hmac.compare_digest(
+                self.digest(proc.stdout), nist.ML_KEM_ENCAP_C_SHA384
+            ) or not hmac.compare_digest(shared_secret, nist.ML_KEM_ENCAP_K):
+                raise ProviderError("ML-KEM-1024 NIST FIPS 203 encapsulation KAT failed")
+
+    def _run_nist_ml_dsa_87_kats(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="qprotect-nist-ml-dsa-kat-") as tmp:
+            root = Path(tmp)
+            public_key, private_key = self._raw_seeded_key_components(
+                algorithm="ML-DSA-87",
+                oid=_ML_DSA_87_OID,
+                seed=nist.ML_DSA_KEYGEN_SEED,
+                public_length=2592,
+                private_length=4896,
+                provider_output_option="ml-dsa.output_formats=priv-only",
+                root=root,
+            )
+            if not hmac.compare_digest(
+                self.digest(public_key), nist.ML_DSA_KEYGEN_PK_SHA384
+            ) or not hmac.compare_digest(
+                self.digest(private_key), nist.ML_DSA_KEYGEN_SK_SHA384
+            ):
+                raise ProviderError("ML-DSA-87 NIST FIPS 204 keyGen KAT failed")
+
+            private_pem = root / "nist-signature-private.pem"
+            message_path = root / "nist-signature-message.bin"
+            private_der = _private_key_info(_ML_DSA_87_OID, nist.ML_DSA_SIGGEN_SK)
+            atomic_write(private_pem, _pem("PRIVATE KEY", private_der))
+            atomic_write(message_path, nist.ML_DSA_SIGGEN_MESSAGE)
+            signature = self._run(
+                [
+                    "pkeyutl",
+                    "-sign",
+                    "-rawin",
+                    "-inkey",
+                    private_pem,
+                    "-in",
+                    message_path,
+                    "-pkeyopt",
+                    "deterministic:1",
+                    "-pkeyopt",
+                    "message-encoding:0",
+                ],
+            ).stdout
+            if not hmac.compare_digest(
+                self.digest(signature), nist.ML_DSA_SIGGEN_SIGNATURE_SHA384
+            ):
+                raise ProviderError("ML-DSA-87 NIST FIPS 204 sigGen KAT failed")
 
     def private_public_key_der(self, private_key_path: str | Path) -> bytes:
         return self._run(["pkey", "-in", private_key_path, "-pubout", "-outform", "DER"]).stdout

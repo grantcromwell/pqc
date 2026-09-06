@@ -1,6 +1,7 @@
 import unittest
 
 from qprotect.constants import AEAD, Hash, KDF, KEM, Signature
+from qprotect.nist_acvp_vectors import ACVP_REVISION
 from qprotect.provider import OpenSSLProvider
 
 
@@ -17,6 +18,7 @@ class ProviderTests(unittest.TestCase):
     def test_assert_ready(self):
         self.provider.assert_ready()
         self.assertTrue(self.provider.info().algorithm_self_tests_passed)
+        self.assertEqual(self.provider.info().nist_acvp_revision, ACVP_REVISION)
 
     def test_random_bytes(self):
         data = self.provider.random_bytes(32)
