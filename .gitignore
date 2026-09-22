@@ -11,6 +11,9 @@ dist/
 *.pem
 *.key
 *.sig
+*.whl
+*.md
+/gpt/
 Cryptographic Module Validation Program _ CSRC.pdf
 
 .github/
