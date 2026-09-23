@@ -697,7 +697,7 @@ void test_disk_plan_helpers() {
     CHECK(arguments[1] == "luksFormat");
     CHECK(arguments.back() == "/dev/example");
     CHECK(qprotect::cpp::format_confirmation(arguments, "example", 8, 1) ==
-          qprotect::cpp::format_confirmation(arguments, "example", 8, 1));
+          "FORMAT-example-05A0BBE818CD0BF5");
     CHECK(qprotect::cpp::format_confirmation(arguments, "example", 8, 1) !=
           qprotect::cpp::format_confirmation(arguments, "example", 8, 2));
     CHECK(qprotect::cpp::shell_quote("a'b") == "'a'\\''b'");
