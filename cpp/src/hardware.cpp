@@ -189,6 +189,14 @@ void discover_devices(std::vector<Capability>& output) {
         const bool resource_manager = name.starts_with("tpmrm") &&
             (name.size() > 5 && std::all_of(name.begin() + 5, name.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; }));
         if (!numbered_tpm && !resource_manager) continue;
+        std::error_code type_error;
+        if (!std::filesystem::is_character_file(item->path(), type_error)) {
+            if (type_error) {
+                error = type_error;
+                break;
+            }
+            continue;
+        }
         ++tpm_count;
         tpm_entries.push_back(name);
     }
