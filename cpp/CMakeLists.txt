@@ -12,6 +12,7 @@ add_library(qprotect_cpp STATIC
     src/identity.cpp
     src/self_test.cpp
     src/secure_file.cpp
+    src/disk.cpp
 )
 target_include_directories(qprotect_cpp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(qprotect_cpp PUBLIC cxx_std_20)

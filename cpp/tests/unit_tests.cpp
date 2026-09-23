@@ -8,6 +8,7 @@
 #include "qprotect/algorithms.hpp"
 #include "qprotect/crypto_context.hpp"
 #include "qprotect/envelope.hpp"
+#include "qprotect/disk.hpp"
 #include "qprotect/error.hpp"
 #include "qprotect/keys.hpp"
 #include "qprotect/secure_bytes.hpp"
@@ -687,6 +688,26 @@ void test_key_files(const CryptoContext& context) {
     ::rmdir(directory.c_str());
 }
 
+void test_disk_plan_helpers() {
+    qprotect::cpp::DiskPlanOptions options;
+    options.device = "/dev/example";
+    options.mapper_name = "secure-root";
+    const auto arguments = qprotect::cpp::format_luks2_arguments(options);
+    CHECK(arguments.front() == "cryptsetup");
+    CHECK(arguments[1] == "luksFormat");
+    CHECK(arguments.back() == "/dev/example");
+    CHECK(qprotect::cpp::format_confirmation(arguments, "example", 8, 1) ==
+          qprotect::cpp::format_confirmation(arguments, "example", 8, 1));
+    CHECK(qprotect::cpp::format_confirmation(arguments, "example", 8, 1) !=
+          qprotect::cpp::format_confirmation(arguments, "example", 8, 2));
+    CHECK(qprotect::cpp::shell_quote("a'b") == "'a'\\''b'");
+    options.mapper_name = "bad/name";
+    CHECK_THROWS(EnvelopeError, qprotect::cpp::format_luks2_arguments(options));
+    options.mapper_name = "valid";
+    options.iter_time_ms = 999;
+    CHECK_THROWS(EnvelopeError, qprotect::cpp::format_luks2_arguments(options));
+}
+
 } // namespace
 
 int main() {
@@ -708,6 +729,7 @@ int main() {
         test_envelope_failures(context);
         test_envelope_serialization(context);
         test_key_files(context);
+        test_disk_plan_helpers();
     } catch (const std::exception& error) {
         std::cerr << "unit test harness error: " << error.what() << "\n";
         return 1;

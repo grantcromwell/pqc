@@ -5,6 +5,7 @@
 #include "qprotect/algorithms.hpp"
 #include "qprotect/constants.hpp"
 #include "qprotect/crypto_context.hpp"
+#include "qprotect/disk.hpp"
 #include "qprotect/envelope.hpp"
 #include "qprotect/error.hpp"
 #include "qprotect/keys.hpp"
@@ -45,6 +46,19 @@ struct Arguments {
     std::string recipient_private_path;
     std::string signer_public_path;
     std::string context = "file";
+    std::string disk_action;
+    std::string disk_device;
+    std::string disk_mapper;
+    std::string disk_key_file;
+    std::string disk_header_file;
+    std::string disk_backup_file;
+    std::string disk_integrity;
+    std::string disk_confirmation;
+    int disk_iter_time = 5000;
+    int disk_argon_memory = 0;
+    int disk_argon_parallelism = 0;
+    int disk_sector_size = 4096;
+    bool disk_execute = false;
 };
 
 void usage(std::ostream& out) {
@@ -61,6 +75,8 @@ void usage(std::ostream& out) {
         << "  identity-encrypt --input JSON --output QPE --recipient PEM [--signer PRIVPEM]\n"
         << "  identity-decrypt --input QPE --output JSON --recipient-private PRIVPEM\n"
         << "           [--signer-public PUBPEM]\n"
+        << "  disk plan|format|open|close --device PATH --mapper NAME [options]\n"
+        << "           format requires --execute --confirmation TOKEN\n"
         << "\n"
         << "options:\n"
         << "  --provider NAME           select an installed OpenSSL provider\n"
@@ -160,7 +176,13 @@ bool parse_arguments(int argc, char* argv[], Arguments& args) {
         return false;
     }
     args.command = argv[1];
-    for (int i = 2; i < argc; ++i) {
+    int first_option = 2;
+    if (args.command == "disk") {
+        if (argc < 3) { std::cerr << "error: disk requires plan|format|open|close\n"; return false; }
+        args.disk_action = argv[2];
+        first_option = 3;
+    }
+    for (int i = first_option; i < argc; ++i) {
         const std::string argument = argv[i];
         const auto value = [&]() -> std::string {
             if (i + 1 >= argc) {
@@ -193,6 +215,30 @@ bool parse_arguments(int argc, char* argv[], Arguments& args) {
                 args.signer_public_path = value();
             } else if (argument == "--context") {
                 args.context = value();
+            } else if (argument == "--device") {
+                args.disk_device = value();
+            } else if (argument == "--mapper") {
+                args.disk_mapper = value();
+            } else if (argument == "--key-file") {
+                args.disk_key_file = value();
+            } else if (argument == "--header") {
+                args.disk_header_file = value();
+            } else if (argument == "--header-backup") {
+                args.disk_backup_file = value();
+            } else if (argument == "--integrity") {
+                args.disk_integrity = value();
+            } else if (argument == "--confirmation") {
+                args.disk_confirmation = value();
+            } else if (argument == "--iter-time") {
+                args.disk_iter_time = std::stoi(value());
+            } else if (argument == "--pbkdf-memory") {
+                args.disk_argon_memory = std::stoi(value());
+            } else if (argument == "--pbkdf-parallel") {
+                args.disk_argon_parallelism = std::stoi(value());
+            } else if (argument == "--sector-size") {
+                args.disk_sector_size = std::stoi(value());
+            } else if (argument == "--execute") {
+                args.disk_execute = true;
             } else {
                 std::cerr << "unknown option: " << argument << "\n";
                 usage(std::cerr);
@@ -451,6 +497,55 @@ int run_identity_decrypt(const CryptoContext& context, const Arguments& args) {
     return 0;
 }
 
+int run_disk(const Arguments& args) {
+    if (args.disk_action != "plan" && args.disk_action != "format" &&
+        args.disk_action != "open" && args.disk_action != "close") {
+        std::cerr << "error: disk action must be plan, format, open, or close\n";
+        return 2;
+    }
+    if (args.disk_device.empty() || args.disk_mapper.empty()) {
+        std::cerr << "error: disk requires --device and --mapper\n";
+        return 2;
+    }
+    qprotect::cpp::DiskPlanOptions options;
+    options.device = args.disk_device;
+    options.mapper_name = args.disk_mapper;
+    if (!args.disk_key_file.empty()) options.key_file = args.disk_key_file;
+    if (!args.disk_header_file.empty()) options.header_file = args.disk_header_file;
+    options.iter_time_ms = args.disk_iter_time;
+    if (args.disk_argon_memory != 0) options.argon2_memory_kib = args.disk_argon_memory;
+    if (args.disk_argon_parallelism != 0) options.argon2_parallelism = args.disk_argon_parallelism;
+    options.sector_size = args.disk_sector_size;
+    if (!args.disk_integrity.empty()) options.integrity = args.disk_integrity;
+    const auto plan = qprotect::cpp::build_luks2_plan(options);
+    if (args.disk_action == "format") {
+        if (!args.disk_execute) throw EnvelopeError("format only runs when --execute is supplied");
+        qprotect::cpp::execute_luks2_format(plan, args.disk_confirmation);
+        return 0;
+    }
+    if (args.disk_action == "open") {
+        if (!args.disk_execute) throw EnvelopeError("open only runs when --execute is supplied");
+        qprotect::cpp::execute_luks2_open(plan);
+        return 0;
+    }
+    if (args.disk_action == "close") {
+        if (!args.disk_execute) throw EnvelopeError("close only runs when --execute is supplied");
+        qprotect::cpp::execute_luks2_close(plan);
+        return 0;
+    }
+    const auto commands = qprotect::cpp::disk_command_strings(
+        plan, args.disk_backup_file.empty() ? std::nullopt : std::optional<std::string>(args.disk_backup_file));
+    std::cout << "{\"device\":\"" << json_escape(plan.device()) << "\",\"profile\":"
+              << qprotect::cpp::disk_profile_json() << ",\"confirmation\":\""
+              << plan.confirmation() << "\",\"commands\":[";
+    for (std::size_t index = 0; index < commands.size(); ++index) {
+        if (index != 0) std::cout << ',';
+        std::cout << '"' << json_escape(commands[index]) << '"';
+    }
+    std::cout << "]}\n";
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -468,6 +563,7 @@ int main(int argc, char* argv[]) {
     }
 
     try {
+        if (args.command == "disk") return run_disk(args);
         const CryptoContext context(args.provider);
         if (args.command == "doctor") {
             return run_diagnostics(context, false);
