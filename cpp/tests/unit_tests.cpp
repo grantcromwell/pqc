@@ -16,11 +16,15 @@
 
 #include "json_minimal.hpp"
 #include "identity.hpp"
+#include "hardware_internal.hpp"
 
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <span>
@@ -729,6 +733,78 @@ void test_hardware_report_schema() {
     CHECK(records > 0);
 }
 
+void test_hardware_fixture_discovery() {
+    char temporary[] = "/tmp/qprotect-hardware-fixture-XXXXXX";
+    char* directory = ::mkdtemp(temporary);
+    CHECK(directory != nullptr);
+    if (directory == nullptr) return;
+    const std::filesystem::path root(directory);
+    qprotect::cpp::detail::HardwarePaths paths;
+    paths.efi_root = root / "efi";
+    paths.pci_root = root / "pci";
+    paths.net_root = root / "net";
+    paths.usb_root = root / "usb";
+    paths.dev_root = root / "dev";
+    paths.rng_root = root / "rng";
+    paths.block_root = root / "block";
+    paths.cpu_vulnerabilities = root / "cpu-vulnerabilities";
+
+    const auto write = [](const std::filesystem::path& file, const std::string& value, bool binary = false) {
+        std::filesystem::create_directories(file.parent_path());
+        std::ofstream stream(file, binary ? std::ios::binary : std::ios::out);
+        stream.write(value.data(), static_cast<std::streamsize>(value.size()));
+    };
+    const auto efi_variable = [](unsigned char value) {
+        return std::string(4, '\0') + static_cast<char>(value);
+    };
+    const std::filesystem::path variables = paths.efi_root / "efivars";
+    write(variables / "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c", efi_variable(1), true);
+    write(variables / "SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c", efi_variable(0), true);
+
+    const std::filesystem::path pci_device = paths.pci_root / "0000:00:01.0";
+    write(pci_device / "class", "0x020000\n");
+    write(pci_device / "vendor", "0x1234\n");
+    write(pci_device / "device", "0xabcd\n");
+    const std::filesystem::path driver = root / "drivers" / "sample_net";
+    std::filesystem::create_directories(driver);
+    std::filesystem::create_directories(paths.net_root / "eth-test" / "wireless");
+    std::filesystem::create_symlink(pci_device, paths.net_root / "eth-test" / "device");
+    std::filesystem::create_symlink(driver, pci_device / "driver");
+    write(paths.net_root / "eth-test" / "operstate", "up\tfixture\n");
+    write(paths.net_root / "eth-test" / "carrier", "1\n");
+
+    write(paths.usb_root / "2-1" / "idVendor", "beef\n");
+    write(paths.usb_root / "2-1" / "idProduct", "cafe\n");
+    write(paths.dev_root / "tpm0", "not a device node");
+    write(paths.rng_root / "rng_available", "sample-rng none\n");
+    write(paths.rng_root / "rng_current", "sample-rng\n");
+    write(paths.block_root / "disk-test" / "dev", "8:0\n");
+    write(paths.block_root / "disk-test" / "ro", "0\n");
+    write(paths.block_root / "disk-test" / "size", "1024\n");
+    write(paths.cpu_vulnerabilities / "sample-vulnerability", "Mitigated\tby fixture\n");
+
+    const std::string parsed_fixture = qprotect::cpp::detail::hardware_report_text(paths);
+    CHECK(parsed_fixture.find("boot\tsecure_boot\tenabled") != std::string::npos);
+    CHECK(parsed_fixture.find("network\tpci_controller\tpresent") != std::string::npos);
+    CHECK(parsed_fixture.find("network\tinterface\tpresent") != std::string::npos);
+    CHECK(parsed_fixture.find("kind=wireless") != std::string::npos);
+    CHECK(parsed_fixture.find("driver=sample_net") != std::string::npos);
+    CHECK(parsed_fixture.find("%09") != std::string::npos);
+    CHECK(parsed_fixture.find("bus\tusb_device\tpresent") != std::string::npos);
+    CHECK(parsed_fixture.find("entropy\thardware_rng\tavailable") != std::string::npos);
+    CHECK(parsed_fixture.find("storage\tblock_device\tpresent") != std::string::npos);
+    CHECK(parsed_fixture.find("cpu_security\tvulnerability\treported") != std::string::npos);
+    CHECK(parsed_fixture.find("trust\ttpm_device_nodes\tunavailable") != std::string::npos);
+
+    std::filesystem::remove(variables / "SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c");
+    const std::string unknown_boot = qprotect::cpp::detail::hardware_report_text(paths);
+    CHECK(unknown_boot.find("boot\tsecure_boot\tunknown") != std::string::npos);
+
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(root, cleanup_error);
+    CHECK(!cleanup_error);
+}
+
 } // namespace
 
 int main() {
@@ -752,6 +828,7 @@ int main() {
         test_key_files(context);
         test_disk_plan_helpers();
         test_hardware_report_schema();
+        test_hardware_fixture_discovery();
     } catch (const std::exception& error) {
         std::cerr << "unit test harness error: " << error.what() << "\n";
         return 1;

@@ -1,4 +1,5 @@
 #include "qprotect/hardware.hpp"
+#include "hardware_internal.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -51,8 +52,7 @@ std::string link_target(const std::filesystem::path& path) {
 
 #if defined(__linux__)
 
-void discover_boot(std::vector<Capability>& output) {
-    const std::filesystem::path efi_root{"/sys/firmware/efi"};
+void discover_boot(std::vector<Capability>& output, const std::filesystem::path& efi_root) {
     std::error_code error;
     if (!std::filesystem::is_directory(efi_root, error)) {
         output.push_back({"boot", "uefi", "unavailable", efi_root.string(),
@@ -94,8 +94,8 @@ void discover_boot(std::vector<Capability>& output) {
     }
 }
 
-void discover_devices(std::vector<Capability>& output) {
-    const std::filesystem::path pci_root{"/sys/bus/pci/devices"};
+void discover_devices(std::vector<Capability>& output, const detail::HardwarePaths& paths) {
+    const auto& pci_root = paths.pci_root;
     std::error_code error;
     std::size_t pci_count = 0;
     std::size_t network_count = 0;
@@ -131,7 +131,7 @@ void discover_devices(std::vector<Capability>& output) {
         output.push_back({"network", "pci_controller", "present", pci_root.string(), entry});
     }
 
-    const std::filesystem::path net_root{"/sys/class/net"};
+    const auto& net_root = paths.net_root;
     error.clear();
     std::vector<std::string> interface_entries;
     std::size_t interface_count = 0;
@@ -158,7 +158,7 @@ void discover_devices(std::vector<Capability>& output) {
     output.push_back({"network", "interfaces", error ? "unknown" : "available", net_root.string(),
                       error ? "network interface inventory is unavailable" : std::to_string(interface_count) + " interfaces"});
 
-    const std::filesystem::path usb_root{"/sys/bus/usb/devices"};
+    const auto& usb_root = paths.usb_root;
     error.clear();
     std::vector<std::string> usb_entries;
     for (std::filesystem::directory_iterator item(usb_root, error), end;
@@ -177,7 +177,7 @@ void discover_devices(std::vector<Capability>& output) {
     output.push_back({"bus", "usb_devices", error ? "unknown" : "available", usb_root.string(),
                       error ? "USB inventory is unavailable" : std::to_string(usb_entries.size()) + " USB devices"});
 
-    const std::filesystem::path tpm_root{"/dev"};
+    const auto& tpm_root = paths.dev_root;
     error.clear();
     std::vector<std::string> tpm_entries;
     std::size_t tpm_count = 0;
@@ -208,14 +208,14 @@ void discover_devices(std::vector<Capability>& output) {
                       tpm_root.string(), error ? "device inventory access failed" :
                       (tpm_count ? std::to_string(tpm_count) + " nodes found; TPM capabilities not attested" : "no TPM character device node found")});
 
-    const std::filesystem::path rng_root{"/sys/class/misc/hw_random"};
+    const auto& rng_root = paths.rng_root;
     const std::string available_rngs = read_text(rng_root / "rng_available");
     const std::string current_rng = read_text(rng_root / "rng_current");
     output.push_back({"entropy", "hardware_rng", available_rngs.empty() ? "unavailable" : "available", rng_root.string(),
                       available_rngs.empty() ? "no hardware RNG list exposed; OpenSSL still uses its configured DRBG" :
                       "available=" + available_rngs + "; current=" + (current_rng.empty() ? "unknown" : current_rng) + "; output quality not tested"});
 
-    const std::filesystem::path block_root{"/sys/class/block"};
+    const auto& block_root = paths.block_root;
     error.clear();
     std::vector<std::string> block_entries;
     std::size_t block_count = 0;
@@ -236,7 +236,7 @@ void discover_devices(std::vector<Capability>& output) {
     output.push_back({"storage", "block_devices", error ? "unknown" : "available", block_root.string(),
                       error ? "block device inventory is unavailable" : std::to_string(block_count) + " devices"});
 
-    const std::filesystem::path cpu_vulnerabilities{"/sys/devices/system/cpu/vulnerabilities"};
+    const auto& cpu_vulnerabilities = paths.cpu_vulnerabilities;
     error.clear();
     std::vector<std::string> cpu_security_entries;
     for (std::filesystem::directory_iterator item(cpu_vulnerabilities, error), end;
@@ -257,12 +257,12 @@ void discover_devices(std::vector<Capability>& output) {
 
 } // namespace
 
-std::string hardware_report_text() {
+std::string detail::hardware_report_text(const HardwarePaths& paths) {
     std::vector<Capability> capabilities;
 #if defined(__linux__)
     capabilities.push_back({"platform", "os", "linux", "compile-time adapter", "Linux sysfs and EFI variable provider"});
-    discover_boot(capabilities);
-    discover_devices(capabilities);
+    discover_boot(capabilities, paths.efi_root);
+    discover_devices(capabilities, paths);
     capabilities.push_back({"physical_security", "side_channel_controls", "not_assessed", "platform-specific validation",
                             "software inventory cannot establish physical resistance"});
     capabilities.push_back({"registers", "safe_register_inventory", "unsupported", "no platform register provider",
@@ -284,6 +284,10 @@ std::string hardware_report_text() {
     report << "qprotect-hardware-v1\n";
     for (const std::string& line : lines) report << line << '\n';
     return report.str();
+}
+
+std::string hardware_report_text() {
+    return detail::hardware_report_text(detail::HardwarePaths{});
 }
 
 } // namespace qprotect::cpp
