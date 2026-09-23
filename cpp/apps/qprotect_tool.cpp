@@ -3,6 +3,7 @@
 // envelope JSON format.
 
 #include "qprotect/algorithms.hpp"
+#include "qprotect/constants.hpp"
 #include "qprotect/crypto_context.hpp"
 #include "qprotect/envelope.hpp"
 #include "qprotect/error.hpp"
@@ -12,9 +13,11 @@
 
 #include "secure_file.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <openssl/crypto.h>
 #include <span>
 #include <string>
 #include <vector>
@@ -44,9 +47,11 @@ struct Arguments {
 };
 
 void usage(std::ostream& out) {
-    out << "usage: qprotect_cpp_tool <command> [options]\n"
+    out << "usage: qprotect <command> [options]\n"
         << "\n"
         << "commands:\n"
+        << "  doctor   report provider readiness and algorithm self-tests\n"
+        << "  selftest run cryptographic self-tests and an envelope round trip\n"
         << "  keygen   --type kem|sign --private PATH --public PATH\n"
         << "  encrypt  --input PATH --output PATH --recipient PEM [--recipient PEM ...]\n"
         << "           [--signer PRIVPEM] [--context STR]\n"
@@ -56,6 +61,93 @@ void usage(std::ostream& out) {
         << "options:\n"
         << "  --provider NAME           select an installed OpenSSL provider\n"
         << "  --force                   atomically replace an existing output\n";
+}
+
+std::string json_escape(const std::string& value) {
+    std::string output;
+    output.reserve(value.size() + 2);
+    for (const unsigned char c : value) {
+        switch (c) {
+            case '"': output += "\\\""; break;
+            case '\\': output += "\\\\"; break;
+            case '\b': output += "\\b"; break;
+            case '\f': output += "\\f"; break;
+            case '\n': output += "\\n"; break;
+            case '\r': output += "\\r"; break;
+            case '\t': output += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    static constexpr char hex[] = "0123456789abcdef";
+                    output += "\\u00";
+                    output.push_back(hex[(c >> 4) & 0x0f]);
+                    output.push_back(hex[c & 0x0f]);
+                } else {
+                    output.push_back(static_cast<char>(c));
+                }
+        }
+    }
+    return output;
+}
+
+void print_health_report(
+    const qprotect::cpp::SelfTestReport& report,
+    bool full_selftest,
+    bool round_trip
+) {
+    std::cout << "{\n"
+              << "  \"tool_version\": \"" << qprotect::cpp::constants::module_version << "\",\n"
+              << "  \"openssl_version\": \"" << json_escape(OpenSSL_version(OPENSSL_VERSION)) << "\",\n"
+              << "  \"provider\": \"" << json_escape(report.provider) << "\",\n"
+              << "  \"ready\": " << (report.passed && (!full_selftest || round_trip) ? "true" : "false") << ",\n"
+              << "  \"algorithm_self_tests_passed\": " << (report.passed ? "true" : "false");
+    if (full_selftest) {
+        std::cout << ",\n  \"envelope_round_trip_passed\": "
+                  << (round_trip ? "true" : "false");
+    }
+    std::cout << ",\n  \"checks\": [\n";
+    for (std::size_t index = 0; index < report.checks.size(); ++index) {
+        const auto& check = report.checks[index];
+        std::cout << "    {\"name\": \"" << json_escape(check.name)
+                  << "\", \"passed\": " << (check.passed ? "true" : "false") << "}";
+        if (index + 1 != report.checks.size() || (full_selftest && round_trip)) {
+            std::cout << ",";
+        }
+        std::cout << "\n";
+    }
+    if (full_selftest) {
+        std::cout << "    {\"name\": \"signed_envelope_round_trip\", \"passed\": "
+                  << (round_trip ? "true" : "false") << "}\n";
+    }
+    std::cout << "  ]\n}\n";
+}
+
+int run_diagnostics(const CryptoContext& context, bool full_selftest) {
+    qprotect::cpp::SelfTestReport report = qprotect::cpp::run_self_tests(context);
+    bool round_trip = false;
+    if (full_selftest && report.passed) {
+        try {
+            const qprotect::cpp::KEMKeyPair recipient = qprotect::cpp::generate_ml_kem_1024(context);
+            const qprotect::cpp::SignatureKeyPair signer = qprotect::cpp::generate_ml_dsa_87(context);
+            qprotect::cpp::EncryptOptions encrypt_options;
+            encrypt_options.context = "selftest";
+            encrypt_options.recipient_public_key_der.push_back(recipient.public_key_der);
+            encrypt_options.signer_private_key_der = signer.private_key_der;
+            static constexpr unsigned char message[] = "qprotect native self-test";
+            const auto plaintext = std::span<const unsigned char>(message, sizeof(message) - 1);
+            const Envelope envelope = qprotect::cpp::encrypt_envelope(context, plaintext, encrypt_options);
+            const Envelope parsed = Envelope::from_json(envelope.to_json());
+            qprotect::cpp::DecryptOptions decrypt_options;
+            decrypt_options.recipient_private_key_der = recipient.private_key_der;
+            decrypt_options.signer_public_key_der = signer.public_key_der;
+            const SecureBytes recovered = qprotect::cpp::decrypt_envelope(context, parsed, decrypt_options);
+            round_trip = recovered.size() == plaintext.size() &&
+                std::equal(recovered.begin(), recovered.end(), plaintext.begin());
+        } catch (const std::exception&) {
+            round_trip = false;
+        }
+    }
+    print_health_report(report, full_selftest, round_trip);
+    return report.passed && (!full_selftest || round_trip) ? 0 : 1;
 }
 
 bool parse_arguments(int argc, char* argv[], Arguments& args) {
@@ -287,6 +379,14 @@ int run_decrypt(const CryptoContext& context, const Arguments& args) {
 } // namespace
 
 int main(int argc, char* argv[]) {
+    if (argc == 1 || std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") {
+        usage(std::cout);
+        return 0;
+    }
+    if (std::string(argv[1]) == "--version") {
+        std::cout << "qprotect " << qprotect::cpp::constants::module_version << "\n";
+        return 0;
+    }
     Arguments args;
     if (!parse_arguments(argc, argv, args)) {
         return 2;
@@ -294,6 +394,12 @@ int main(int argc, char* argv[]) {
 
     try {
         const CryptoContext context(args.provider);
+        if (args.command == "doctor") {
+            return run_diagnostics(context, false);
+        }
+        if (args.command == "selftest") {
+            return run_diagnostics(context, true);
+        }
         const qprotect::cpp::SelfTestReport health = qprotect::cpp::run_self_tests(context);
         if (!health.passed) {
             throw CryptoError("required algorithm self-test failed");

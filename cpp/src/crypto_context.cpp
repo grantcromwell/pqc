@@ -45,7 +45,6 @@ CryptoContext::CryptoContext(const std::string& provider)
     }
 
     impl_->properties = "provider=" + provider_;
-    assert_ready();
 }
 
 CryptoContext::~CryptoContext() = default;
