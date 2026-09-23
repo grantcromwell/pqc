@@ -745,6 +745,8 @@ void test_hardware_fixture_discovery() {
     paths.net_root = root / "net";
     paths.usb_root = root / "usb";
     paths.dev_root = root / "dev";
+    paths.tpm_root = root / "tpm";
+    paths.iommu_root = root / "iommu";
     paths.rng_root = root / "rng";
     paths.block_root = root / "block";
     paths.cpu_vulnerabilities = root / "cpu-vulnerabilities";
@@ -765,6 +767,8 @@ void test_hardware_fixture_discovery() {
     write(pci_device / "class", "0x020000\n");
     write(pci_device / "vendor", "0x1234\n");
     write(pci_device / "device", "0xabcd\n");
+    std::filesystem::create_directories(paths.iommu_root / "17");
+    std::filesystem::create_symlink(paths.iommu_root / "17", pci_device / "iommu_group");
     const std::filesystem::path driver = root / "drivers" / "sample_net";
     std::filesystem::create_directories(driver);
     std::filesystem::create_directories(paths.net_root / "eth-test" / "wireless");
@@ -776,6 +780,7 @@ void test_hardware_fixture_discovery() {
     write(paths.usb_root / "2-1" / "idVendor", "beef\n");
     write(paths.usb_root / "2-1" / "idProduct", "cafe\n");
     write(paths.dev_root / "tpm0", "not a device node");
+    write(paths.tpm_root / "tpm0" / "tpm_version_major", "2\n");
     write(paths.rng_root / "rng_available", "sample-rng none\n");
     write(paths.rng_root / "rng_current", "sample-rng\n");
     write(paths.block_root / "disk-test" / "dev", "8:0\n");
@@ -786,6 +791,8 @@ void test_hardware_fixture_discovery() {
     const std::string parsed_fixture = qprotect::cpp::detail::hardware_report_text(paths);
     CHECK(parsed_fixture.find("boot\tsecure_boot\tenabled") != std::string::npos);
     CHECK(parsed_fixture.find("network\tpci_controller\tpresent") != std::string::npos);
+    CHECK(parsed_fixture.find("iommu_group=17") != std::string::npos);
+    CHECK(parsed_fixture.find("dma_security\tiommu_groups\tavailable") != std::string::npos);
     CHECK(parsed_fixture.find("network\tinterface\tpresent") != std::string::npos);
     CHECK(parsed_fixture.find("kind=wireless") != std::string::npos);
     CHECK(parsed_fixture.find("driver=sample_net") != std::string::npos);
@@ -795,6 +802,7 @@ void test_hardware_fixture_discovery() {
     CHECK(parsed_fixture.find("storage\tblock_device\tpresent") != std::string::npos);
     CHECK(parsed_fixture.find("cpu_security\tvulnerability\treported") != std::string::npos);
     CHECK(parsed_fixture.find("trust\ttpm_device_nodes\tunavailable") != std::string::npos);
+    CHECK(parsed_fixture.find("trust\ttpm_sysfs_device\tpresent") != std::string::npos);
 
     std::filesystem::remove(variables / "SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c");
     const std::string unknown_boot = qprotect::cpp::detail::hardware_report_text(paths);

@@ -108,11 +108,13 @@ void discover_devices(std::vector<Capability>& output, const detail::HardwarePat
         const std::string vendor = read_text(item->path() / "vendor");
         const std::string device = read_text(item->path() / "device");
         const std::string driver = link_target(item->path() / "driver");
+        const std::string iommu_group = link_target(item->path() / "iommu_group");
         ++pci_count;
         const std::string normalized = "id=" + id + ";class=" + (class_code.empty() ? "unknown" : class_code) +
             ";vendor=" + (vendor.empty() ? "unknown" : vendor) + ";device=" +
             (device.empty() ? "unknown" : device) + ";driver=" +
-            (driver.empty() ? "unbound" : std::filesystem::path(driver).filename().string());
+            (driver.empty() ? "unbound" : std::filesystem::path(driver).filename().string()) +
+            ";iommu_group=" + (iommu_group.empty() ? "unassigned-or-unavailable" : std::filesystem::path(iommu_group).filename().string());
         pci_entries.push_back(normalized);
         if (class_code.starts_with("0x02")) {
             ++network_count;
@@ -208,6 +210,27 @@ void discover_devices(std::vector<Capability>& output, const detail::HardwarePat
                       tpm_root.string(), error ? "device inventory access failed" :
                       (tpm_count ? std::to_string(tpm_count) + " nodes found; TPM capabilities not attested" : "no TPM character device node found")});
 
+    error.clear();
+    const auto& tpm_sysfs_root = paths.tpm_root;
+    std::size_t tpm_sysfs_count = 0;
+    for (std::filesystem::directory_iterator item(tpm_sysfs_root, error), end;
+         !error && item != end; item.increment(error)) {
+        std::error_code type_error;
+        if (!std::filesystem::is_directory(item->path(), type_error)) {
+            if (type_error) { error = type_error; break; }
+            continue;
+        }
+        ++tpm_sysfs_count;
+        const std::string name = item->path().filename().string();
+        output.push_back({"trust", "tpm_sysfs_device", "present", tpm_sysfs_root.string(),
+                          "name=" + name + ";version=" +
+                          (read_text(item->path() / "tpm_version_major").empty() ? "unknown" : read_text(item->path() / "tpm_version_major")) +
+                          ";device=" + (link_target(item->path() / "device").empty() ? "unavailable" : link_target(item->path() / "device"))});
+    }
+    output.push_back({"trust", "tpm_sysfs_inventory", error ? "unknown" : (tpm_sysfs_count ? "available" : "unavailable"),
+                      tpm_sysfs_root.string(), error ? "TPM sysfs inventory access failed" :
+                      std::to_string(tpm_sysfs_count) + " TPM devices exposed by sysfs"});
+
     const auto& rng_root = paths.rng_root;
     const std::string available_rngs = read_text(rng_root / "rng_available");
     const std::string current_rng = read_text(rng_root / "rng_current");
@@ -251,6 +274,18 @@ void discover_devices(std::vector<Capability>& output, const detail::HardwarePat
     output.push_back({"cpu_security", "kernel_vulnerability_status", error ? "unknown" : "available",
                       cpu_vulnerabilities.string(), error ? "kernel mitigation status is unavailable" :
                       std::to_string(cpu_security_entries.size()) + " kernel-reported entries; physical side-channel resistance is not established"});
+
+    error.clear();
+    std::size_t iommu_group_count = 0;
+    for (std::filesystem::directory_iterator item(paths.iommu_root, error), end;
+         !error && item != end; item.increment(error)) {
+        std::error_code type_error;
+        if (std::filesystem::is_directory(item->path(), type_error)) ++iommu_group_count;
+        else if (type_error) { error = type_error; break; }
+    }
+    output.push_back({"dma_security", "iommu_groups", error ? "unknown" : (iommu_group_count ? "available" : "unavailable"),
+                      paths.iommu_root.string(), error ? "IOMMU group inventory access failed" :
+                      std::to_string(iommu_group_count) + " groups; membership is reported per PCI device and is not a security guarantee"});
 }
 
 #endif
