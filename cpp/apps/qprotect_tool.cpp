@@ -577,7 +577,7 @@ int main(int argc, char* argv[]) {
                 std::cerr << "error: hardware action must be doctor\n";
                 return 2;
             }
-            std::cout << qprotect::cpp::hardware_report_json();
+            std::cout << qprotect::cpp::hardware_report_text();
             return 0;
         }
         const CryptoContext context(args.provider);

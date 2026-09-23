@@ -22,6 +22,7 @@
 
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <span>
 #include <string>
 #include <utility>
@@ -710,21 +711,22 @@ void test_disk_plan_helpers() {
 }
 
 void test_hardware_report_schema() {
-    const auto parsed_report = qprotect::cpp::json::Value::parse(qprotect::cpp::hardware_report_json());
-    const auto& object = parsed_report.expect_object("hardware report");
-    CHECK(object.at("schema_version").as_integer() == 1);
-    CHECK(object.at("platform").is_string());
-    CHECK(object.at("read_only").as_boolean());
-    CHECK(object.at("capabilities").is_array());
-    CHECK(!object.at("capabilities").as_array().empty());
-    for (const auto& capability : object.at("capabilities").as_array()) {
-        const auto& fields = capability.expect_object("hardware capability");
-        CHECK(fields.at("domain").is_string());
-        CHECK(fields.at("name").is_string());
-        CHECK(fields.at("state").is_string());
-        CHECK(fields.at("source").is_string());
-        CHECK(fields.at("evidence").is_string());
+    std::istringstream input_stream(qprotect::cpp::hardware_report_text());
+    std::string line;
+    CHECK(static_cast<bool>(std::getline(input_stream, line)) && line == "qprotect-hardware-v1");
+    std::string previous;
+    std::size_t records = 0;
+    while (std::getline(input_stream, line)) {
+        if (line.empty()) continue;
+        std::size_t separators = 0;
+        for (const char character : line) if (character == '\t') ++separators;
+        CHECK(separators == 4);
+        CHECK(previous.empty() || previous <= line);
+        CHECK(line.find('\r') == std::string::npos);
+        previous = line;
+        ++records;
     }
+    CHECK(records > 0);
 }
 
 } // namespace
