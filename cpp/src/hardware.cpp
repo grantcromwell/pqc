@@ -145,8 +145,16 @@ void discover_devices(std::vector<Capability>& output) {
         ++interface_count;
         const std::string name = item->path().filename().string();
         const std::string device_path = link_target(item->path() / "device");
-        interface_entries.push_back(name + "{device=" +
-            (device_path.empty() ? "virtual-or-unavailable" : device_path) + "}");
+        const std::string driver_path = link_target(item->path() / "device" / "driver");
+        std::error_code wireless_error;
+        const bool wireless = std::filesystem::exists(item->path() / "wireless", wireless_error);
+        std::ostringstream entry;
+        entry << name << "{device=" << (device_path.empty() ? "virtual-or-unavailable" : device_path)
+              << ",driver=" << (driver_path.empty() ? "unbound-or-virtual" : std::filesystem::path(driver_path).filename().string())
+              << ",kind=" << (wireless ? "wireless" : "other")
+              << ",state=" << (read_text(item->path() / "operstate").empty() ? "unknown" : read_text(item->path() / "operstate"))
+              << ",carrier=" << (read_text(item->path() / "carrier").empty() ? "unknown" : read_text(item->path() / "carrier")) << '}';
+        interface_entries.push_back(entry.str());
     }
     std::sort(interface_entries.begin(), interface_entries.end());
     std::ostringstream interfaces;
@@ -156,6 +164,27 @@ void discover_devices(std::vector<Capability>& output) {
     }
     output.push_back({"network", "interfaces", error ? "unknown" : "available", net_root.string(),
                       error ? "network interface inventory is unavailable" : std::to_string(interface_count) + " interfaces: " + interfaces.str()});
+
+    const std::filesystem::path usb_root{"/sys/bus/usb/devices"};
+    error.clear();
+    std::vector<std::string> usb_entries;
+    for (std::filesystem::directory_iterator item(usb_root, error), end;
+         !error && item != end; item.increment(error)) {
+        const std::string vendor = read_text(item->path() / "idVendor");
+        if (vendor.empty()) continue;
+        const std::string product = read_text(item->path() / "idProduct");
+        const std::string driver_path = link_target(item->path() / "driver");
+        usb_entries.push_back(item->path().filename().string() + "{vendor=" + vendor + ",product=" + product +
+            ",driver=" + (driver_path.empty() ? "unbound" : std::filesystem::path(driver_path).filename().string()) + "}");
+    }
+    std::sort(usb_entries.begin(), usb_entries.end());
+    std::ostringstream usb;
+    for (std::size_t index = 0; index < usb_entries.size(); ++index) {
+        if (index != 0) usb << ';';
+        usb << usb_entries[index];
+    }
+    output.push_back({"bus", "usb_devices", error ? "unknown" : "available", usb_root.string(),
+                      error ? "USB inventory is unavailable" : std::to_string(usb_entries.size()) + " USB devices: " + usb.str()});
 
     const std::filesystem::path tpm_root{"/dev"};
     error.clear();
@@ -211,6 +240,24 @@ void discover_devices(std::vector<Capability>& output) {
     }
     output.push_back({"storage", "block_devices", error ? "unknown" : "available", block_root.string(),
                       error ? "block device inventory is unavailable" : std::to_string(block_count) + " devices: " + blocks.str()});
+
+    const std::filesystem::path cpu_vulnerabilities{"/sys/devices/system/cpu/vulnerabilities"};
+    error.clear();
+    std::vector<std::string> cpu_security_entries;
+    for (std::filesystem::directory_iterator item(cpu_vulnerabilities, error), end;
+         !error && item != end; item.increment(error)) {
+        const std::string status = read_text(item->path());
+        cpu_security_entries.push_back(item->path().filename().string() + "=" + (status.empty() ? "unknown" : status));
+    }
+    std::sort(cpu_security_entries.begin(), cpu_security_entries.end());
+    std::ostringstream cpu_security;
+    for (std::size_t index = 0; index < cpu_security_entries.size(); ++index) {
+        if (index != 0) cpu_security << ';';
+        cpu_security << cpu_security_entries[index];
+    }
+    output.push_back({"cpu_security", "kernel_vulnerability_status", error ? "unknown" : "available",
+                      cpu_vulnerabilities.string(), error ? "kernel mitigation status is unavailable" :
+                      "kernel-reported status only: " + cpu_security.str() + "; physical side-channel resistance is not established"});
 }
 
 #endif
