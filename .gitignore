@@ -1,17 +1,66 @@
+# Python bytecode, test caches, and local environments
 __pycache__/
 *.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+env/
+
+# Python packaging
 *.egg-info/
 build/
-build-cmake/
 dist/
-.venv/
+*.whl
+
+# C++ and CMake output
+build-cmake/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+Testing/
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Local CI, editor, and operating-system files
 .ci/
-*.qpe
-*.qpe.json
+.cache/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.log
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
 *.pem
 *.key
 *.sig
-*.whl
+
+# Generated qprotect artifacts
+*.qpe
+*.qpe.json
+
+# Local reports and model work
 *.md
 /gpt/
 Cryptographic Module Validation Program _ CSRC.pdf
