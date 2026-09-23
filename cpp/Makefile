@@ -10,6 +10,7 @@ SELFTEST := $(BUILD_DIR)/qprotect_cpp_selftest
 TOOL := $(BUILD_DIR)/qprotect_cpp_tool
 NATIVE_TOOL := $(BUILD_DIR)/qprotect
 UNITTESTS := $(BUILD_DIR)/qprotect_cpp_unittests
+INTEGRATION := $(BUILD_DIR)/qprotect_native_integration
 
 SOURCES := \
     src/crypto_context.cpp \
@@ -49,6 +50,9 @@ $(NATIVE_TOOL): $(BUILD_DIR)/qprotect_tool.o $(LIBRARY)
 $(UNITTESTS): $(BUILD_DIR)/unit_tests.o $(LIBRARY)
 	$(CXX) $(CXXFLAGS) -Iinclude $< $(LIBRARY) $(LDFLAGS) -o $@
 
+$(INTEGRATION): $(BUILD_DIR)/native_integration.o
+	$(CXX) $(CXXFLAGS) $< -o $@
+
 $(BUILD_DIR)/selftest_main.o: apps/selftest_main.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -Iinclude -c $< -o $@
 
@@ -58,12 +62,15 @@ $(BUILD_DIR)/qprotect_tool.o: apps/qprotect_tool.cpp | $(BUILD_DIR)
 $(BUILD_DIR)/unit_tests.o: tests/unit_tests.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -Iinclude -Isrc -c $< -o $@
 
+$(BUILD_DIR)/native_integration.o: tests/native_integration.cpp | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
 test: $(SELFTEST) $(UNITTESTS)
 	$(SELFTEST)
 	$(UNITTESTS)
 
-integration: all $(UNITTESTS)
-	python3 tests/integration_interop.py
+integration: all $(INTEGRATION)
+	$(INTEGRATION) $(NATIVE_TOOL)
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -42,11 +42,15 @@ target_link_libraries(qprotect_cpp_unittests PRIVATE qprotect_cpp)
 # Unit tests reach the internal JSON header under src/.
 target_include_directories(qprotect_cpp_unittests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+add_executable(qprotect_native_integration tests/native_integration.cpp)
+
 enable_testing()
 add_test(NAME qprotect_cpp_selftest
          COMMAND qprotect_cpp_selftest)
 add_test(NAME qprotect_cpp_unittests
          COMMAND qprotect_cpp_unittests)
+add_test(NAME qprotect_native_integration
+         COMMAND qprotect_native_integration $<TARGET_FILE:qprotect>)
 
 install(TARGETS qprotect qprotect_cpp
         RUNTIME DESTINATION bin
