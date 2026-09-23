@@ -1,26 +1,6 @@
-# Python bytecode, test caches, and local environments
-__pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-.venv/
-venv/
-env/
-
-# Python packaging
-*.egg-info/
-build/
-dist/
-*.whl
-
 # C++ and CMake output
+/cpp/build/
+/cpp/build-cmake/
 build-cmake/
 CMakeFiles/
 CMakeCache.txt
