@@ -32,6 +32,11 @@ add_executable(qprotect_cpp_tool apps/qprotect_tool.cpp)
 target_link_libraries(qprotect_cpp_tool PRIVATE qprotect_cpp)
 target_include_directories(qprotect_cpp_tool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+# Keep the transition-era target while providing the stable native CLI name.
+add_executable(qprotect apps/qprotect_tool.cpp)
+target_link_libraries(qprotect PRIVATE qprotect_cpp)
+target_include_directories(qprotect PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 add_executable(qprotect_cpp_unittests tests/unit_tests.cpp)
 target_link_libraries(qprotect_cpp_unittests PRIVATE qprotect_cpp)
 # Unit tests reach the internal JSON header under src/.
@@ -42,3 +47,8 @@ add_test(NAME qprotect_cpp_selftest
          COMMAND qprotect_cpp_selftest)
 add_test(NAME qprotect_cpp_unittests
          COMMAND qprotect_cpp_unittests)
+
+install(TARGETS qprotect qprotect_cpp
+        RUNTIME DESTINATION bin
+        ARCHIVE DESTINATION lib)
+install(DIRECTORY include/qprotect DESTINATION include)

@@ -8,6 +8,7 @@ BUILD_DIR := build
 LIBRARY := $(BUILD_DIR)/libqprotect_cpp.a
 SELFTEST := $(BUILD_DIR)/qprotect_cpp_selftest
 TOOL := $(BUILD_DIR)/qprotect_cpp_tool
+NATIVE_TOOL := $(BUILD_DIR)/qprotect
 UNITTESTS := $(BUILD_DIR)/qprotect_cpp_unittests
 
 SOURCES := \
@@ -25,7 +26,7 @@ OBJECTS := $(patsubst src/%.cpp,$(BUILD_DIR)/%.o,$(SOURCES))
 
 .PHONY: all test integration clean
 
-all: $(LIBRARY) $(SELFTEST) $(TOOL)
+all: $(LIBRARY) $(SELFTEST) $(TOOL) $(NATIVE_TOOL)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -40,6 +41,9 @@ $(SELFTEST): $(BUILD_DIR)/selftest_main.o $(LIBRARY)
 	$(CXX) $(CXXFLAGS) -Iinclude $< $(LIBRARY) $(LDFLAGS) -o $@
 
 $(TOOL): $(BUILD_DIR)/qprotect_tool.o $(LIBRARY)
+	$(CXX) $(CXXFLAGS) -Iinclude -Isrc $< $(LIBRARY) $(LDFLAGS) -o $@
+
+$(NATIVE_TOOL): $(BUILD_DIR)/qprotect_tool.o $(LIBRARY)
 	$(CXX) $(CXXFLAGS) -Iinclude -Isrc $< $(LIBRARY) $(LDFLAGS) -o $@
 
 $(UNITTESTS): $(BUILD_DIR)/unit_tests.o $(LIBRARY)
