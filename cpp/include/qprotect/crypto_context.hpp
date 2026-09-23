@@ -18,7 +18,9 @@ struct CryptoContextHandles;
 /// Owns an OpenSSL library context and the providers used by the module.
 ///
 /// The intended module boundary includes this class, its C++ implementation,
-/// the exact OpenSSL libcrypto build, and the providers selected here.
+/// the exact OpenSSL libcrypto build, and the providers selected here. Context
+/// construction loads the provider; callers must run assert_ready or the full
+/// self-test suite before using algorithms operationally.
 class CryptoContext {
 public:
     explicit CryptoContext(const std::string& provider = "default");

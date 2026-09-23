@@ -9,6 +9,7 @@ add_library(qprotect_cpp STATIC
     src/envelope.cpp
     src/keys.cpp
     src/json_minimal.cpp
+    src/identity.cpp
     src/self_test.cpp
     src/secure_file.cpp
 )

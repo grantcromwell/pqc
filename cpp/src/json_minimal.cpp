@@ -1,7 +1,10 @@
 #include "json_minimal.hpp"
 
 #include <cctype>
+#include <charconv>
+#include <cmath>
 #include <cstdio>
+#include <system_error>
 
 namespace qprotect::cpp::json {
 namespace {
@@ -60,11 +63,14 @@ private:
         return text_[position_];
     }
 
-    Value parse_value() {
+    Value parse_value(std::size_t depth = 0) {
+        if (depth > 64) {
+            fail("maximum nesting depth exceeded");
+        }
         const char c = peek();
         switch (c) {
-            case '{': return parse_object();
-            case '[': return parse_array();
+            case '{': return parse_object(depth);
+            case '[': return parse_array(depth);
             case '"': return Value(parse_string());
             case 't': return parse_literal("true", Value(true));
             case 'f': return parse_literal("false", Value(false));
@@ -83,7 +89,7 @@ private:
         return value;
     }
 
-    Value parse_object() {
+    Value parse_object(std::size_t depth) {
         expect('{');
         Object object;
         skip_whitespace();
@@ -99,7 +105,7 @@ private:
             skip_whitespace();
             expect(':');
             skip_whitespace();
-            Value value = parse_value();
+            Value value = parse_value(depth + 1);
             if (!object.emplace(std::move(key), std::move(value)).second) {
                 fail("duplicate object key");
             }
@@ -112,7 +118,7 @@ private:
         }
     }
 
-    Value parse_array() {
+    Value parse_array(std::size_t depth) {
         expect('[');
         Array array;
         skip_whitespace();
@@ -121,7 +127,7 @@ private:
         }
         while (true) {
             skip_whitespace();
-            array.push_back(parse_value());
+            array.push_back(parse_value(depth + 1));
             skip_whitespace();
             if (consume(',')) {
                 continue;
@@ -228,31 +234,62 @@ private:
     Value parse_number() {
         const std::size_t start = position_;
         consume('-');
-        while (position_ < text_.size() &&
-               std::isdigit(static_cast<unsigned char>(text_[position_]))) {
+        if (consume('0')) {
+            if (position_ < text_.size() && std::isdigit(static_cast<unsigned char>(text_[position_]))) {
+                fail("leading zero in number");
+            }
+        } else {
+            if (position_ >= text_.size() || text_[position_] < '1' || text_[position_] > '9') {
+                fail("invalid number");
+            }
+            while (position_ < text_.size() &&
+                   std::isdigit(static_cast<unsigned char>(text_[position_]))) {
+                ++position_;
+            }
+        }
+        bool fractional = false;
+        if (consume('.')) {
+            fractional = true;
+            const std::size_t fraction_start = position_;
+            while (position_ < text_.size() &&
+                   std::isdigit(static_cast<unsigned char>(text_[position_]))) {
+                ++position_;
+            }
+            if (position_ == fraction_start) {
+                fail("fraction requires digits");
+            }
+        }
+        if (position_ < text_.size() && (text_[position_] == 'e' || text_[position_] == 'E')) {
+            fractional = true;
             ++position_;
+            if (position_ < text_.size() && (text_[position_] == '+' || text_[position_] == '-')) {
+                ++position_;
+            }
+            const std::size_t exponent_start = position_;
+            while (position_ < text_.size() &&
+                   std::isdigit(static_cast<unsigned char>(text_[position_]))) {
+                ++position_;
+            }
+            if (position_ == exponent_start) {
+                fail("exponent requires digits");
+            }
         }
-        if (position_ == start || (position_ == start + 1 && text_[start] == '-')) {
-            fail("invalid number");
+        const char* first = text_.data() + start;
+        const char* last = text_.data() + position_;
+        if (fractional) {
+            double value = 0.0;
+            const auto parsed = std::from_chars(first, last, value, std::chars_format::general);
+            if (parsed.ec != std::errc{} || parsed.ptr != last || !std::isfinite(value)) {
+                fail("number is out of range");
+            }
+            return Value(value);
         }
-        if (position_ < text_.size() &&
-            (text_[position_] == '.' || text_[position_] == 'e' || text_[position_] == 'E')) {
-            // The envelope format contains only integers. Anything else is
-            // rejected rather than approximated.
-            fail("non-integer numbers are not supported");
-        }
-        const std::string digits = text_.substr(start, position_ - start);
         long long value = 0;
-        for (const char digit : digits) {
-            if (digit == '-') {
-                continue;
-            }
-            if (value > (0x7FFFFFFFFFFFFFFFLL - (digit - '0')) / 10) {
-                fail("integer out of range");
-            }
-            value = value * 10 + (digit - '0');
+        const auto parsed = std::from_chars(first, last, value);
+        if (parsed.ec != std::errc{} || parsed.ptr != last) {
+            fail("integer out of range");
         }
-        return Value(digits.front() == '-' ? -value : value);
+        return Value(value);
     }
 };
 
@@ -292,6 +329,20 @@ void append_scalar(std::string& out, const Value& value) {
         case Value::Type::Integer:
             out += std::to_string(value.as_integer());
             break;
+        case Value::Type::Number: {
+            char buffer[64]{};
+            const auto rendered = std::to_chars(
+                buffer, buffer + sizeof(buffer), value.as_number(), std::chars_format::general);
+            if (rendered.ec != std::errc{}) {
+                throw EnvelopeError("unable to serialize JSON number");
+            }
+            std::string number(buffer, rendered.ptr);
+            if (number.find_first_of(".eE") == std::string::npos) {
+                number += ".0";
+            }
+            out += number;
+            break;
+        }
         case Value::Type::String: append_escaped(out, value.as_string()); break;
         default: break; // handled by the container serializer
     }
@@ -398,6 +449,16 @@ long long Value::as_integer() const {
         throw EnvelopeError("JSON value is not an integer");
     }
     return integer_;
+}
+
+double Value::as_number() const {
+    if (type_ == Type::Integer) {
+        return static_cast<double>(integer_);
+    }
+    if (type_ != Type::Number) {
+        throw EnvelopeError("JSON value is not a number");
+    }
+    return number_;
 }
 
 const std::string& Value::as_string() const {

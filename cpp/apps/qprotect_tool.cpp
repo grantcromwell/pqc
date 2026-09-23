@@ -11,6 +11,7 @@
 #include "qprotect/secure_bytes.hpp"
 #include "qprotect/self_test.hpp"
 
+#include "identity.hpp"
 #include "secure_file.hpp"
 
 #include <algorithm>
@@ -56,6 +57,9 @@ void usage(std::ostream& out) {
         << "  encrypt  --input PATH --output PATH --recipient PEM [--recipient PEM ...]\n"
         << "           [--signer PRIVPEM] [--context STR]\n"
         << "  decrypt  --input PATH --output PATH --recipient-private PRIVPEM\n"
+        << "           [--signer-public PUBPEM]\n"
+        << "  identity-encrypt --input JSON --output QPE --recipient PEM [--signer PRIVPEM]\n"
+        << "  identity-decrypt --input QPE --output JSON --recipient-private PRIVPEM\n"
         << "           [--signer-public PUBPEM]\n"
         << "\n"
         << "options:\n"
@@ -202,16 +206,18 @@ bool parse_arguments(int argc, char* argv[], Arguments& args) {
     return true;
 }
 
-SecureBytes read_binary_file(const std::string& path) {
+SecureBytes read_binary_file(
+    const std::string& path,
+    std::streamoff maximum = 64LL * 1024 * 1024
+) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
         throw EnvelopeError("unable to open input file: " + path);
     }
     file.seekg(0, std::ios::end);
     const std::streamoff size = file.tellg();
-    constexpr std::streamoff kMaximumPayload = 64LL * 1024 * 1024;
-    if (size < 0 || size > kMaximumPayload) {
-        throw EnvelopeError("input exceeds the 64 MiB envelope-v1 limit");
+    if (size < 0 || size > maximum) {
+        throw EnvelopeError("input exceeds the format size limit");
     }
     file.seekg(0, std::ios::beg);
     SecureBytes data(static_cast<std::size_t>(size));
@@ -376,6 +382,75 @@ int run_decrypt(const CryptoContext& context, const Arguments& args) {
     return 0;
 }
 
+struct WipeString {
+    std::string& value;
+    ~WipeString() {
+        if (!value.empty()) {
+            OPENSSL_cleanse(value.data(), value.size());
+        }
+    }
+};
+
+int run_identity_encrypt(const CryptoContext& context, const Arguments& args) {
+    if (args.input_path.empty() || args.output_path.empty() || args.recipients.empty()) {
+        std::cerr << "error: identity-encrypt requires --input, --output, and at least one --recipient\n";
+        return 2;
+    }
+    reject_same_path(args.input_path, args.output_path);
+    const SecureBytes input = read_binary_file(args.input_path, 1024 * 1024);
+    std::string input_text(reinterpret_cast<const char*>(input.data()), input.size());
+    WipeString wipe_input{input_text};
+    const qprotect::cpp::json::Value record = qprotect::cpp::detail::normalize_identity(
+        qprotect::cpp::json::Value::parse(input_text));
+    std::string payload = record.canonical();
+    WipeString wipe_payload{payload};
+
+    qprotect::cpp::EncryptOptions options;
+    options.context = "identity";
+    for (const std::string& recipient : args.recipients) {
+        options.recipient_public_key_der.push_back(qprotect::cpp::load_public_key_file(context, recipient));
+    }
+    if (!args.signer_private_path.empty()) {
+        options.signer_private_key_der = qprotect::cpp::load_private_key_file(
+            context, args.signer_private_path);
+    }
+    const Envelope envelope = qprotect::cpp::encrypt_envelope(
+        context,
+        std::span<const unsigned char>(reinterpret_cast<const unsigned char*>(payload.data()), payload.size()),
+        options);
+    const std::string json = envelope.to_json();
+    write_binary_file(args.output_path,
+        std::span<const unsigned char>(reinterpret_cast<const unsigned char*>(json.data()), json.size()),
+        args.force);
+    return 0;
+}
+
+int run_identity_decrypt(const CryptoContext& context, const Arguments& args) {
+    if (args.input_path.empty() || args.output_path.empty() || args.recipient_private_path.empty()) {
+        std::cerr << "error: identity-decrypt requires --input, --output, and --recipient-private\n";
+        return 2;
+    }
+    reject_same_path(args.input_path, args.output_path);
+    const Envelope envelope = Envelope::from_json(read_text_file(args.input_path));
+    qprotect::cpp::DecryptOptions options;
+    options.recipient_private_key_der = qprotect::cpp::load_private_key_file(
+        context, args.recipient_private_path);
+    if (!args.signer_public_path.empty()) {
+        options.signer_public_key_der = qprotect::cpp::load_public_key_file(
+            context, args.signer_public_path);
+    }
+    const SecureBytes decrypted = qprotect::cpp::decrypt_envelope(context, envelope, options);
+    std::string plaintext(reinterpret_cast<const char*>(decrypted.data()), decrypted.size());
+    WipeString wipe_plaintext{plaintext};
+    const qprotect::cpp::json::Value record = qprotect::cpp::detail::normalize_identity(
+        qprotect::cpp::json::Value::parse(plaintext));
+    const std::string rendered = record.pretty(2) + "\n";
+    write_binary_file(args.output_path,
+        std::span<const unsigned char>(reinterpret_cast<const unsigned char*>(rendered.data()), rendered.size()),
+        args.force);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -412,6 +487,12 @@ int main(int argc, char* argv[]) {
         }
         if (args.command == "decrypt") {
             return run_decrypt(context, args);
+        }
+        if (args.command == "identity-encrypt") {
+            return run_identity_encrypt(context, args);
+        }
+        if (args.command == "identity-decrypt") {
+            return run_identity_decrypt(context, args);
         }
         std::cerr << "unknown command: " << args.command << "\n";
         usage(std::cerr);

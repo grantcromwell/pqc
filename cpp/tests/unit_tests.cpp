@@ -13,6 +13,7 @@
 #include "qprotect/secure_bytes.hpp"
 
 #include "json_minimal.hpp"
+#include "identity.hpp"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -372,7 +373,17 @@ void test_json_parse() {
     CHECK_THROWS(EnvelopeError, Value::parse("{\"a\":1,}"));
     CHECK_THROWS(EnvelopeError, Value::parse("[1,2]x"));
     CHECK_THROWS(EnvelopeError, Value::parse("{\"a\":1 \"b\":2}"));
-    CHECK_THROWS(EnvelopeError, Value::parse("{\"a\":1.5}"));
+    CHECK(Value::parse("{\"a\":1.5}").canonical() == R"({"a":1.5})");
+    CHECK(Value::parse("{\"a\":1e-5}").canonical() == R"({"a":1e-05})");
+    CHECK(Value(1.0).canonical() == "1.0");
+    CHECK_THROWS(EnvelopeError, Value::parse("{\"a\":01}"));
+    CHECK_THROWS(EnvelopeError, Value::parse("{\"a\":1.}"));
+    CHECK_THROWS(EnvelopeError, Value::parse("{\"a\":1e+}"));
+    CHECK_THROWS(EnvelopeError, Value::parse("{\"a\":1e9999}"));
+    std::string deeply_nested(66, '[');
+    deeply_nested += "0";
+    deeply_nested.append(66, ']');
+    CHECK_THROWS(EnvelopeError, Value::parse(deeply_nested));
     CHECK_THROWS(EnvelopeError, Value::parse("{\"a\":\x01}"));
     CHECK_THROWS(EnvelopeError, Value::parse("{\"a\":\"\\q\"}"));
     CHECK_THROWS(EnvelopeError, Value::parse("nul"));
@@ -384,6 +395,38 @@ void test_json_parse() {
     CHECK(parsed.as_object().at("a").as_integer() == 1);
     CHECK(parsed.as_object().at("b").as_array().size() == 3);
     CHECK(parsed.as_object().at("c").as_object().at("d").as_string() == "é");
+}
+
+void test_identity_normalization() {
+    using qprotect::cpp::detail::normalize_identity;
+    using qprotect::cpp::json::Value;
+
+    const Value normalized = normalize_identity(Value::parse(
+        R"({"ip":"2001:0DB8:0:0:0:0:0:1","mac":"00-1A-2B-3C-4D-5E","serial":" SN-7 ","uuid":"123E4567-E89B-12D3-A456-426614174000","wifi_bssid":"AA.BB.CC.DD.EE.FF","gps":{"latitude":38.8951,"longitude":-77.0364,"accuracy_m":8},"browser_fingerprint":{"timezone":"UTC"},"site":"lab"})"));
+    const auto& fields = normalized.as_object();
+    CHECK(fields.at("ip_address").as_string() == "2001:db8::1");
+    CHECK(fields.at("mac_address").as_string() == "00:1a:2b:3c:4d:5e");
+    CHECK(fields.at("hardware_serial").as_string() == "SN-7");
+    CHECK(fields.at("uuid").as_string() == "123e4567-e89b-12d3-a456-426614174000");
+    CHECK(fields.at("wifi_bssid").as_string() == "aa:bb:cc:dd:ee:ff");
+    CHECK(fields.at("gps").as_object().at("latitude").canonical() == "38.8951");
+    CHECK(fields.at("additional").as_object().at("site").as_string() == "lab");
+    CHECK(fields.at("browser_fingerprint").as_object().at("timezone").as_string() == "UTC");
+    CHECK(fields.at("guid").is_null());
+    const Value timestamped = normalize_identity(Value::parse(
+        R"({"gps":{"latitude":0,"longitude":0,"timestamp":"2026-09-22T12:30:45.123Z"}})"));
+    CHECK(timestamped.as_object().at("gps").as_object().at("timestamp").as_string() ==
+          "2026-09-22T12:30:45.123Z");
+
+    CHECK_THROWS(EnvelopeError, normalize_identity(Value::parse(R"({"ip":"not-an-ip"})")));
+    CHECK_THROWS(EnvelopeError, normalize_identity(Value::parse(R"({"mac":"00:11"})")));
+    CHECK_THROWS(EnvelopeError, normalize_identity(Value::parse(R"({"uuid":"bad"})")));
+    CHECK_THROWS(EnvelopeError, normalize_identity(Value::parse(R"({"serial":"\u0000"})")));
+    CHECK_THROWS(EnvelopeError, normalize_identity(Value::parse(R"({"gps":{"latitude":91,"longitude":0}})")));
+    CHECK_THROWS(EnvelopeError, normalize_identity(Value::parse(R"({"gps":{"latitude":true,"longitude":0}})")));
+    CHECK_THROWS(EnvelopeError, normalize_identity(Value::parse(R"({"gps":{"latitude":0,"longitude":0,"timestamp":"2026-02-30T00:00:00Z"}})")));
+    CHECK_THROWS(EnvelopeError, normalize_identity(Value::parse(R"({"ip":"127.0.0.1"," ip ":"127.0.0.2"})")));
+    CHECK_THROWS(EnvelopeError, normalize_identity(Value::parse(R"({"additional":[]})")));
 }
 
 // --------------------------------------------------------------- envelope
@@ -660,6 +703,7 @@ int main() {
         test_context();
         test_json_canonical();
         test_json_parse();
+        test_identity_normalization();
         test_envelope_roundtrip(context);
         test_envelope_failures(context);
         test_envelope_serialization(context);
