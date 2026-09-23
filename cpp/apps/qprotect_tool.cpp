@@ -8,6 +8,7 @@
 #include "qprotect/disk.hpp"
 #include "qprotect/envelope.hpp"
 #include "qprotect/error.hpp"
+#include "qprotect/hardware.hpp"
 #include "qprotect/keys.hpp"
 #include "qprotect/secure_bytes.hpp"
 #include "qprotect/self_test.hpp"
@@ -54,6 +55,7 @@ struct Arguments {
     std::string disk_backup_file;
     std::string disk_integrity;
     std::string disk_confirmation;
+    std::string hardware_action;
     int disk_iter_time = 5000;
     int disk_argon_memory = 0;
     int disk_argon_parallelism = 0;
@@ -77,6 +79,7 @@ void usage(std::ostream& out) {
         << "           [--signer-public PUBPEM]\n"
         << "  disk plan|format|open|close --device PATH --mapper NAME [options]\n"
         << "           format requires --execute --confirmation TOKEN\n"
+        << "  hardware doctor          read-only dynamic platform inventory\n"
         << "\n"
         << "options:\n"
         << "  --provider NAME           select an installed OpenSSL provider\n"
@@ -180,6 +183,11 @@ bool parse_arguments(int argc, char* argv[], Arguments& args) {
     if (args.command == "disk") {
         if (argc < 3) { std::cerr << "error: disk requires plan|format|open|close\n"; return false; }
         args.disk_action = argv[2];
+        first_option = 3;
+    }
+    if (args.command == "hardware") {
+        if (argc < 3) { std::cerr << "error: hardware requires doctor\n"; return false; }
+        args.hardware_action = argv[2];
         first_option = 3;
     }
     for (int i = first_option; i < argc; ++i) {
@@ -564,6 +572,14 @@ int main(int argc, char* argv[]) {
 
     try {
         if (args.command == "disk") return run_disk(args);
+        if (args.command == "hardware") {
+            if (args.hardware_action != "doctor") {
+                std::cerr << "error: hardware action must be doctor\n";
+                return 2;
+            }
+            std::cout << qprotect::cpp::hardware_report_json();
+            return 0;
+        }
         const CryptoContext context(args.provider);
         if (args.command == "doctor") {
             return run_diagnostics(context, false);

@@ -9,6 +9,7 @@
 #include "qprotect/crypto_context.hpp"
 #include "qprotect/envelope.hpp"
 #include "qprotect/disk.hpp"
+#include "qprotect/hardware.hpp"
 #include "qprotect/error.hpp"
 #include "qprotect/keys.hpp"
 #include "qprotect/secure_bytes.hpp"
@@ -708,6 +709,24 @@ void test_disk_plan_helpers() {
     CHECK_THROWS(EnvelopeError, qprotect::cpp::format_luks2_arguments(options));
 }
 
+void test_hardware_report_schema() {
+    const auto parsed_report = qprotect::cpp::json::Value::parse(qprotect::cpp::hardware_report_json());
+    const auto& object = parsed_report.expect_object("hardware report");
+    CHECK(object.at("schema_version").as_integer() == 1);
+    CHECK(object.at("platform").is_string());
+    CHECK(object.at("read_only").as_boolean());
+    CHECK(object.at("capabilities").is_array());
+    CHECK(!object.at("capabilities").as_array().empty());
+    for (const auto& capability : object.at("capabilities").as_array()) {
+        const auto& fields = capability.expect_object("hardware capability");
+        CHECK(fields.at("domain").is_string());
+        CHECK(fields.at("name").is_string());
+        CHECK(fields.at("state").is_string());
+        CHECK(fields.at("source").is_string());
+        CHECK(fields.at("evidence").is_string());
+    }
+}
+
 } // namespace
 
 int main() {
@@ -730,6 +749,7 @@ int main() {
         test_envelope_serialization(context);
         test_key_files(context);
         test_disk_plan_helpers();
+        test_hardware_report_schema();
     } catch (const std::exception& error) {
         std::cerr << "unit test harness error: " << error.what() << "\n";
         return 1;

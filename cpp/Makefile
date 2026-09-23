@@ -21,7 +21,8 @@ SOURCES := \
     src/identity.cpp \
     src/self_test.cpp \
     src/secure_file.cpp \
-    src/disk.cpp
+    src/disk.cpp \
+    src/hardware.cpp
 
 OBJECTS := $(patsubst src/%.cpp,$(BUILD_DIR)/%.o,$(SOURCES))
 

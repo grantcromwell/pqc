@@ -57,6 +57,7 @@ int main(int argc, char** argv) {
     passed &= check(run({tool, "--version"}) == 0, "native version command");
     passed &= check(run({tool, "doctor"}) == 0, "native doctor command");
     passed &= check(run({tool, "selftest"}) == 0, "native selftest command");
+    passed &= check(run({tool, "hardware", "doctor"}) == 0, "read-only hardware inventory command");
 
     passed &= check(run({tool, "keygen", "--type", "kem", "--private", path("recipient.pem").string(),
                          "--public", path("recipient.pub").string()}) == 0,
