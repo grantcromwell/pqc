@@ -1,6 +1,7 @@
 #include "qprotect/disk.hpp"
 
 #include "json_minimal.hpp"
+#include "disk_internal.hpp"
 #include "qprotect/error.hpp"
 
 #include <openssl/evp.h>
@@ -246,15 +247,10 @@ void validate_luks2_plan_internal(const Luks2Plan& plan) {
     }
 }
 
-void validate_format_target_unused_internal(const Luks2Plan& plan) {
-    const ProcessResult probe = run_process(
-        {"lsblk", "--json", "--paths", "--output", "PATH,TYPE,MOUNTPOINTS", plan.device()}, true, 10);
-    if (probe.exit_code != 0) {
-        throw EnvelopeError("unable to verify block-device mount and holder state");
-    }
+void detail::validate_lsblk_safety_json(const std::string& report) {
     json::Value parsed;
     try {
-        parsed = json::Value::parse(probe.output);
+        parsed = json::Value::parse(report);
     } catch (const std::exception&) {
         throw EnvelopeError("unable to parse block-device safety information");
     }
@@ -296,6 +292,15 @@ void validate_format_target_unused_internal(const Luks2Plan& plan) {
         }
         ++index;
     }
+}
+
+void validate_format_target_unused_internal(const Luks2Plan& plan) {
+    const ProcessResult probe = run_process(
+        {"lsblk", "--json", "--paths", "--output", "PATH,TYPE,MOUNTPOINTS", plan.device()}, true, 10);
+    if (probe.exit_code != 0) {
+        throw EnvelopeError("unable to verify block-device mount and holder state");
+    }
+    detail::validate_lsblk_safety_json(probe.output);
 
     const std::filesystem::path holders = std::filesystem::path("/sys/dev/block") /
         (std::to_string(plan.major_) + ":" + std::to_string(plan.minor_)) / "holders";

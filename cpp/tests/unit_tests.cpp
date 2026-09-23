@@ -17,6 +17,7 @@
 #include "json_minimal.hpp"
 #include "identity.hpp"
 #include "hardware_internal.hpp"
+#include "disk_internal.hpp"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -714,6 +715,20 @@ void test_disk_plan_helpers() {
     CHECK_THROWS(EnvelopeError, qprotect::cpp::format_luks2_arguments(options));
 }
 
+void test_disk_safety_report_validation() {
+    const auto validate = [](const std::string& report) {
+        qprotect::cpp::detail::validate_lsblk_safety_json(report);
+    };
+    CHECK_NO_THROW(validate(R"({"blockdevices":[{"path":"/dev/fake","mountpoints":[null]}]})"));
+    CHECK_THROWS(EnvelopeError, validate("not json"));
+    CHECK_THROWS(EnvelopeError, validate(R"({"blockdevices":[]})"));
+    CHECK_THROWS(EnvelopeError, validate(R"({"blockdevices":[{"mountpoints":["/mnt/data"]}]})"));
+    CHECK_THROWS(EnvelopeError, validate(
+        R"({"blockdevices":[{"mountpoints":[null],"children":[{"mountpoints":["/boot"]}]}]})"));
+    CHECK_THROWS(EnvelopeError, validate(
+        R"({"blockdevices":[{"mountpoints":[null],"children":[{"mountpoints":[null]}]}]})"));
+}
+
 void test_hardware_report_schema() {
     std::istringstream input_stream(qprotect::cpp::hardware_report_text());
     std::string line;
@@ -835,6 +850,7 @@ int main() {
         test_envelope_serialization(context);
         test_key_files(context);
         test_disk_plan_helpers();
+        test_disk_safety_report_validation();
         test_hardware_report_schema();
         test_hardware_fixture_discovery();
     } catch (const std::exception& error) {
