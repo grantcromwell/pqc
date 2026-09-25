@@ -294,9 +294,8 @@ private:
 };
 
 void append_escaped(std::string& out, const std::string& value) {
-    // Matches Python json.dumps(..., ensure_ascii=False): escape the two
-    // mandatory characters and C0 control characters (with the same short
-    // forms), pass everything else through as raw UTF-8.
+    // Escape quotes, backslashes, and C0 controls, using short escapes where
+    // available. Preserve all other characters as UTF-8.
     static const char hex[] = "0123456789abcdef";
     out.push_back('"');
     for (const char raw : value) {

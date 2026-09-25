@@ -327,9 +327,7 @@ void test_context() {
 // -------------------------------------------------------------------- JSON
 
 void test_json_canonical() {
-    // Expected outputs match Python:
-    //   json.dumps(value, sort_keys=True, separators=(",", ":"),
-    //               ensure_ascii=False)
+    // Compact JSON sorts object keys and preserves UTF-8 characters.
     const qprotect::cpp::json::Object object = {
         {"b", qprotect::cpp::json::Value(1)},
         {"a", qprotect::cpp::json::Value("x")},
@@ -344,8 +342,8 @@ void test_json_canonical() {
     };
     CHECK(qprotect::cpp::json::Value(array).canonical() == R"([2,null,true,"s"])");
 
-    // Control characters use Python's escapes: short forms where they exist,
-    // lowercase \u00xx otherwise. DEL passes through raw, like Python.
+    // Control characters use short escapes where available and lowercase
+    // \u00xx otherwise. DEL passes through unchanged.
     const std::string tricky = std::string("q\"uote\\back") + '\x1f' + '\x7f' + '\n';
     const qprotect::cpp::json::Object escape_object = {
         {"a", qprotect::cpp::json::Value(tricky)},
@@ -364,7 +362,7 @@ void test_json_canonical() {
     CHECK(qprotect::cpp::json::Value(outer).canonical() ==
           R"({"nested":{"a":2,"z":1}})");
 
-    // Pretty form matches json.dumps(..., indent=2, sort_keys=True).
+    // Pretty output uses two-space indentation and sorted keys.
     const qprotect::cpp::json::Object pretty_object = {
         {"b", qprotect::cpp::json::Value(1)},
         {"a", qprotect::cpp::json::Value("x")},
@@ -409,16 +407,18 @@ void test_identity_normalization() {
     using qprotect::cpp::detail::normalize_identity;
     using qprotect::cpp::json::Value;
 
+    // Synthetic identifiers and coordinates; no captured device records.
     const Value normalized = normalize_identity(Value::parse(
-        R"({"ip":"2001:0DB8:0:0:0:0:0:1","mac":"00-1A-2B-3C-4D-5E","serial":" SN-7 ","uuid":"123E4567-E89B-12D3-A456-426614174000","wifi_bssid":"AA.BB.CC.DD.EE.FF","gps":{"latitude":38.8951,"longitude":-77.0364,"accuracy_m":8},"browser_fingerprint":{"timezone":"UTC"},"site":"lab"})"));
+        R"({"ip":"2001:0DB8:0:0:0:0:0:1","mac":"02-00-00-00-00-0A","serial":" TEST-DEVICE ","uuid":"00000000-0000-4000-A000-000000000001","wifi_bssid":"02.00.00.00.00.0B","gps":{"latitude":0,"longitude":0,"accuracy_m":8},"browser_fingerprint":{"timezone":"UTC"},"site":"test-site"})"));
     const auto& fields = normalized.as_object();
     CHECK(fields.at("ip_address").as_string() == "2001:db8::1");
-    CHECK(fields.at("mac_address").as_string() == "00:1a:2b:3c:4d:5e");
-    CHECK(fields.at("hardware_serial").as_string() == "SN-7");
-    CHECK(fields.at("uuid").as_string() == "123e4567-e89b-12d3-a456-426614174000");
-    CHECK(fields.at("wifi_bssid").as_string() == "aa:bb:cc:dd:ee:ff");
-    CHECK(fields.at("gps").as_object().at("latitude").canonical() == "38.8951");
-    CHECK(fields.at("additional").as_object().at("site").as_string() == "lab");
+    CHECK(fields.at("mac_address").as_string() == "02:00:00:00:00:0a");
+    CHECK(fields.at("hardware_serial").as_string() == "TEST-DEVICE");
+    CHECK(fields.at("uuid").as_string() == "00000000-0000-4000-a000-000000000001");
+    CHECK(fields.at("wifi_bssid").as_string() == "02:00:00:00:00:0b");
+    CHECK(fields.at("gps").as_object().at("latitude").as_number() == 0.0);
+    CHECK(fields.at("gps").as_object().at("longitude").as_number() == 0.0);
+    CHECK(fields.at("additional").as_object().at("site").as_string() == "test-site");
     CHECK(fields.at("browser_fingerprint").as_object().at("timezone").as_string() == "UTC");
     CHECK(fields.at("guid").is_null());
     const Value timestamped = normalize_identity(Value::parse(
@@ -673,10 +673,13 @@ void test_envelope_serialization(const CryptoContext& context) {
 // -------------------------------------------------------------------- keys
 
 void test_key_files(const CryptoContext& context) {
-    const std::string directory = "/tmp/qprotect-cpp-unit-keys";
+    char temporary[] = "./qprotect-cpp-unit-keys-XXXXXX";
+    char* created = ::mkdtemp(temporary);
+    CHECK(created != nullptr);
+    if (created == nullptr) return;
+    const std::string directory = created;
     const std::string private_pem = directory + "/device-private.pem";
     const std::string public_pem = directory + "/device-public.pem";
-    ::mkdir(directory.c_str(), 0700);
 
     const KEMKeyPair key_pair = generate_ml_kem_1024(context);
     write_private_key_pem(context, key_pair.private_key_der, private_pem);
@@ -685,6 +688,13 @@ void test_key_files(const CryptoContext& context) {
     // PEM round-trips through the same key_id.
     const SecureBytes loaded_public = load_public_key_file(context, public_pem);
     CHECK(key_id_for_public_key(context, loaded_public) == key_pair.key_id);
+    const SecureBytes loaded_private = load_private_key_file(context, private_pem);
+    CHECK(qprotect::cpp::public_key_of_private(context, loaded_private) == loaded_public);
+    struct stat status {};
+    CHECK(::stat(private_pem.c_str(), &status) == 0 && (status.st_mode & 0777) == 0600);
+    CHECK_THROWS(EnvelopeError,
+        write_private_key_pem(context, key_pair.private_key_der, private_pem));
+    CHECK(load_private_key_file(context, private_pem) == loaded_private);
 
     // Wrong key type in a public key slot is rejected.
     CHECK_THROWS(EnvelopeError, load_public_key_file(context, private_pem));
@@ -693,6 +703,46 @@ void test_key_files(const CryptoContext& context) {
     ::unlink(private_pem.c_str());
     ::unlink(public_pem.c_str());
     ::rmdir(directory.c_str());
+}
+
+void test_private_key_envelopes(const CryptoContext& context) {
+    // Every private key is generated for this test run.
+    const KEMKeyPair recipient = generate_ml_kem_1024(context);
+    const SignatureKeyPair signer = generate_ml_dsa_87(context);
+    const KEMKeyPair kem_owner = generate_ml_kem_1024(context);
+    const SignatureKeyPair signing_owner = generate_ml_dsa_87(context);
+    const DecryptOptions decrypt_options{recipient.private_key_der, signer.public_key_der, true};
+    const auto protect_and_recover = [&](const SecureBytes& private_key) {
+        const EncryptOptions options = options_for(
+            {recipient.public_key_der}, "private-key", &signer.private_key_der);
+        const Envelope sealed = encrypt_envelope(context, private_key, options);
+        const Envelope parsed = Envelope::from_json(sealed.to_json());
+        const SecureBytes recovered = decrypt_envelope(context, parsed, decrypt_options);
+        CHECK(recovered == private_key);
+
+        Envelope tampered = parsed;
+        tampered.ciphertext[0] ^= 1;
+        CHECK_THROWS(EnvelopeError, decrypt_envelope(context, tampered, decrypt_options));
+        tampered = parsed;
+        tampered.signature.reset();
+        tampered.signer_key_id.reset();
+        CHECK_THROWS(EnvelopeError, decrypt_envelope(context, tampered, decrypt_options));
+        CHECK_THROWS(EnvelopeError, decrypt_envelope(context, parsed,
+            (DecryptOptions{kem_owner.private_key_der, signer.public_key_der, true})));
+        CHECK_THROWS(EnvelopeError, decrypt_envelope(context, parsed,
+            (DecryptOptions{recipient.private_key_der, signing_owner.public_key_der, true})));
+        return recovered;
+    };
+
+    const SecureBytes recovered_kem = protect_and_recover(kem_owner.private_key_der);
+    const KEMEncapsulation encapsulation = encapsulate_ml_kem_1024(context, kem_owner.public_key_der);
+    CHECK(decapsulate_ml_kem_1024(context, recovered_kem, encapsulation.ciphertext) ==
+          encapsulation.shared_secret);
+
+    const SecureBytes recovered_signer = protect_and_recover(signing_owner.private_key_der);
+    const SecureBytes message = bytes("recovered signing key test");
+    const SecureBytes signature = sign_ml_dsa_87(context, recovered_signer, message);
+    CHECK(verify_ml_dsa_87(context, signing_owner.public_key_der, message, signature));
 }
 
 void test_disk_plan_helpers() {
@@ -729,8 +779,8 @@ void test_disk_safety_report_validation() {
         R"({"blockdevices":[{"mountpoints":[null],"children":[{"mountpoints":[null]}]}]})"));
 }
 
-void test_hardware_report_schema() {
-    std::istringstream input_stream(qprotect::cpp::hardware_report_text());
+void test_hardware_report_schema(const std::string& report_text) {
+    std::istringstream input_stream(report_text);
     std::string line;
     CHECK(static_cast<bool>(std::getline(input_stream, line)) && line == "qprotect-hardware-v1");
     std::string previous;
@@ -749,11 +799,11 @@ void test_hardware_report_schema() {
 }
 
 void test_hardware_fixture_discovery() {
-    char temporary[] = "/tmp/qprotect-hardware-fixture-XXXXXX";
+    char temporary[] = "./qprotect-hardware-fixture-XXXXXX";
     char* directory = ::mkdtemp(temporary);
     CHECK(directory != nullptr);
     if (directory == nullptr) return;
-    const std::filesystem::path root(directory);
+    const std::filesystem::path root = std::filesystem::absolute(directory);
     qprotect::cpp::detail::HardwarePaths paths;
     paths.efi_root = root / "efi";
     paths.pci_root = root / "pci";
@@ -804,6 +854,7 @@ void test_hardware_fixture_discovery() {
     write(paths.cpu_vulnerabilities / "sample-vulnerability", "Mitigated\tby fixture\n");
 
     const std::string parsed_fixture = qprotect::cpp::detail::hardware_report_text(paths);
+    test_hardware_report_schema(parsed_fixture);
     CHECK(parsed_fixture.find("boot\tsecure_boot\tenabled") != std::string::npos);
     CHECK(parsed_fixture.find("network\tpci_controller\tpresent") != std::string::npos);
     CHECK(parsed_fixture.find("iommu_group=17") != std::string::npos);
@@ -849,9 +900,9 @@ int main() {
         test_envelope_failures(context);
         test_envelope_serialization(context);
         test_key_files(context);
+        test_private_key_envelopes(context);
         test_disk_plan_helpers();
         test_disk_safety_report_validation();
-        test_hardware_report_schema();
         test_hardware_fixture_discovery();
     } catch (const std::exception& error) {
         std::cerr << "unit test harness error: " << error.what() << "\n";

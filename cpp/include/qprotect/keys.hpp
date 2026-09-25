@@ -10,7 +10,7 @@ namespace qprotect::cpp {
 
 /// Load a public key file (PEM SubjectPublicKeyInfo or raw DER) and return
 /// its SubjectPublicKeyInfo DER encoding, the form used for key_id and the
-/// KEM. PEM files interoperate with the Python CLI and OpenSSL pkey output.
+/// KEM. PEM files interoperate with OpenSSL pkey output.
 SecureBytes load_public_key_file(const CryptoContext& context,
                                  const std::string& path);
 
@@ -29,8 +29,7 @@ std::string key_id_for_public_key(const CryptoContext& context,
                                   std::span<const unsigned char> public_key_der);
 
 /// Write a private key as a PKCS#8 PEM file ("-----BEGIN PRIVATE KEY-----").
-/// The file is created with owner-only 0600 permissions, matching the
-/// Python CLI.
+/// The file is created with owner-only 0600 permissions.
 void write_private_key_pem(const CryptoContext& context,
                            std::span<const unsigned char> private_key_der,
                            const std::string& path,

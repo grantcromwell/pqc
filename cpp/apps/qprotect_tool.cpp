@@ -1,6 +1,5 @@
 // qprotect C++ tool: key generation and KEM/AEAD envelope encryption for
-// files, interoperating with the Python qprotect CLI's PEM keys and
-// envelope JSON format.
+// files using PEM keys and the qprotect envelope JSON format.
 
 #include "qprotect/algorithms.hpp"
 #include "qprotect/constants.hpp"

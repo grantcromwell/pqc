@@ -46,3 +46,14 @@ Thumbs.db
 Cryptographic Module Validation Program _ CSRC.pdf
 
 .github/
+
+# Python sources and local environments
+*.py
+*.pyi
+*.py[cod]
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/

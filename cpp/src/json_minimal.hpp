@@ -2,11 +2,9 @@
 
 // Internal header: not part of the public API.
 //
-// Minimal JSON support for the envelope layer. The serializer reproduces the
-// Python reference implementation's json.dumps(..., sort_keys=True,
-// ensure_ascii=False) byte-for-byte, both compact (separators=(",", ":")) and
-// indented (indent=2), so signatures and AAD computed over serialized
-// headers are identical across the two implementations.
+// Minimal JSON support for the envelope layer. Sorted keys, UTF-8 text,
+// and fixed separators keep signatures and AAD stable across serialization.
+// Both compact and indented output are supported.
 
 #include <cstdint>
 #include <cmath>
@@ -20,8 +18,7 @@ namespace qprotect::cpp::json {
 
 class Value;
 using Array = std::vector<Value>;
-// std::map iterates keys in sorted order, which is what Python's
-// sort_keys=True produces. UTF-8 byte order matches Python's codepoint order.
+// std::map keeps object keys sorted. Valid UTF-8 sorts in codepoint order.
 using Object = std::map<std::string, Value>;
 
 class Value {
@@ -65,7 +62,7 @@ public:
     /// Compact canonical form: sorted keys, separators=(",", ":").
     std::string canonical() const;
 
-    /// Indented form matching json.dumps(..., indent=2, sort_keys=True).
+    /// Indented form with sorted object keys.
     std::string pretty(int indent) const;
 
     /// Parse a complete JSON document. Throws EnvelopeError on malformed

@@ -11,8 +11,7 @@
 namespace qprotect::cpp {
 
 /// One ML-KEM-1024 recipient entry: the KEM ciphertext and the AES-256-GCM
-/// wrapped content key, exactly as serialized by the Python reference
-/// implementation's qprotect-envelope-v1 format.
+/// wrapped content key in the qprotect-envelope-v1 format.
 struct EnvelopeRecipient {
     std::string key_id;          // 32 lowercase hex characters
     SecureBytes kem_ciphertext;  // ML-KEM-1024 ciphertext, 1568 bytes
@@ -33,8 +32,7 @@ struct Envelope {
     std::optional<std::string> signer_key_id;
     std::optional<SecureBytes> signature;
 
-    /// Serialized envelope JSON, byte-compatible with the Python reference
-    /// implementation (json.dumps(indent=2, sort_keys=True)).
+    /// Serialized envelope JSON with sorted keys and two-space indentation.
     std::string to_json() const;
 
     /// Parse and strictly validate an envelope document.

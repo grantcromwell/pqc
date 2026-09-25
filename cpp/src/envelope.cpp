@@ -80,8 +80,8 @@ std::string base64_encode(std::span<const unsigned char> input) {
 }
 
 SecureBytes base64_decode(const std::string& value, const char* field) {
-    // Mirrors the Python parser: strict alphabet, optional padding, no
-    // whitespace or other characters accepted.
+    // Require the base64 alphabet and padding for incomplete groups;
+    // whitespace and other characters are rejected.
     if (!value.empty() && value.back() == '\n') {
         throw EnvelopeError(std::string("invalid base64 field: ") + field);
     }
@@ -154,9 +154,7 @@ bool is_valid_key_id(const std::string& key_id) {
 }
 
 void validate_context(const std::string& context) {
-    // Same rules as the Python reference: non-empty, at most 128 characters,
-    // no control characters. The wrap-info string must be ASCII-encodable,
-    // matching Python's .encode("ascii").
+    // Contexts are non-empty printable ASCII strings of at most 128 bytes.
     if (context.empty() || context.size() > 128) {
         throw EnvelopeError("context must be a non-empty string of at most 128 characters");
     }
@@ -196,8 +194,7 @@ SecureBytes wrap_info_bytes(const std::string& context, const std::string& key_i
 }
 
 std::string utc_now_iso8601() {
-    // Matches datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    // including microseconds (which Python emits whenever nonzero).
+    // UTC timestamp with six fractional digits and a trailing Z.
     const auto now = std::chrono::system_clock::now();
     const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
     const auto fraction = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -269,15 +266,13 @@ json::Value envelope_to_dict(const Envelope& envelope, bool include_signature) {
     return json::Value(std::move(out));
 }
 
-/// Canonical JSON of the unsigned envelope. This is the ML-DSA-87 signature
-/// material, identical to the Python Envelope::signature_material().
+/// Canonical JSON of the unsigned envelope, used as ML-DSA-87 signature material.
 std::string signature_material(const Envelope& envelope) {
     return envelope_to_dict(envelope, false).canonical();
 }
 
 /// Canonical JSON of the unsigned envelope header without the payload
-/// ciphertext and tag. This is the AES-256-GCM payload AAD, identical to the
-/// Python Envelope::payload_aad().
+/// ciphertext and tag, used as AES-256-GCM payload AAD.
 std::string payload_aad(const Envelope& envelope) {
     json::Object header = envelope_to_dict(envelope, false).as_object();
     header.erase("ciphertext");
@@ -608,8 +603,8 @@ SecureBytes decrypt_envelope(
     }
 
     try {
-        // Like the Python reference, every failure below surfaces as an
-        // EnvelopeError, including provider-level authentication failures.
+        // Decryption failures surface as EnvelopeError, including provider
+        // authentication failures.
         const SecureBytes info = wrap_info_bytes(envelope.context, recipient_it->key_id);
         const SecureBytes secret = decapsulate_ml_kem_1024(
             context,
