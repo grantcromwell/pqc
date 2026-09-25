@@ -45,11 +45,16 @@ target_include_directories(qprotect_cpp_unittests PRIVATE ${CMAKE_CURRENT_SOURCE
 
 add_executable(qprotect_native_integration tests/native_integration.cpp)
 
+add_executable(qprotect_startup_tests tests/startup_tests.cpp)
+target_link_libraries(qprotect_startup_tests PRIVATE qprotect_cpp)
+
 enable_testing()
 add_test(NAME qprotect_cpp_selftest
          COMMAND qprotect_cpp_selftest)
 add_test(NAME qprotect_cpp_unittests
          COMMAND qprotect_cpp_unittests)
+add_test(NAME qprotect_startup_tests
+         COMMAND qprotect_startup_tests)
 add_test(NAME qprotect_native_integration
          COMMAND qprotect_native_integration $<TARGET_FILE:qprotect>)
 

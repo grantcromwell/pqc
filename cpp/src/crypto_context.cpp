@@ -1,4 +1,5 @@
 #include "qprotect/crypto_context.hpp"
+#include "qprotect/self_test.hpp"
 
 #include "crypto_context_handles.hpp"
 #include "openssl_utils.hpp"
@@ -45,6 +46,10 @@ CryptoContext::CryptoContext(const std::string& provider)
     }
 
     impl_->properties = "provider=" + provider_;
+    const SelfTestReport report = run_self_tests(*this);
+    if (!report.passed) {
+        throw CryptoError("required algorithm self-test failed");
+    }
 }
 
 CryptoContext::~CryptoContext() = default;

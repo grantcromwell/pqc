@@ -1,6 +1,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <cerrno>
 #include <filesystem>
@@ -12,10 +13,16 @@
 
 namespace {
 
-int run(const std::vector<std::string>& arguments) {
+int run(const std::vector<std::string>& arguments, const std::string& output_path = {}) {
     const pid_t child = ::fork();
     if (child < 0) return -1;
     if (child == 0) {
+        if (!output_path.empty()) {
+            const int output = ::open(output_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+            if (output < 0) _exit(127);
+            if (::dup2(output, STDOUT_FILENO) < 0 || ::dup2(output, STDERR_FILENO) < 0) _exit(127);
+            ::close(output);
+        }
         std::vector<char*> argv;
         argv.reserve(arguments.size() + 1);
         for (const std::string& item : arguments) argv.push_back(const_cast<char*>(item.c_str()));
@@ -47,7 +54,7 @@ int main(int argc, char** argv) {
         std::cerr << "usage: qprotect_native_integration /path/to/qprotect\n";
         return 2;
     }
-    char temporary[] = "/tmp/qprotect-native-integration-XXXXXX";
+    char temporary[] = "./qprotect-native-integration-XXXXXX";
     char* directory = ::mkdtemp(temporary);
     if (directory == nullptr) return 1;
     const std::filesystem::path root(directory);
@@ -57,6 +64,13 @@ int main(int argc, char** argv) {
     passed &= check(run({tool, "--version"}) == 0, "native version command");
     passed &= check(run({tool, "doctor"}) == 0, "native doctor command");
     passed &= check(run({tool, "selftest"}) == 0, "native selftest command");
+    for (const std::string command : {"disk", "hardware"}) {
+        const std::string action = command == "disk" ? "plan" : "doctor";
+        const auto output = path("startup-failure.log");
+        passed &= check(run({tool, command, action, "--provider", "base"}, output.string()) != 0 &&
+                        read_file(output).find("required algorithm self-test failed") != std::string::npos,
+                        "startup failure blocks command dispatch");
+    }
     passed &= check(run({tool, "hardware", "doctor"}) == 0, "read-only hardware inventory command");
 
     passed &= check(run({tool, "keygen", "--type", "kem", "--private", path("recipient.pem").string(),

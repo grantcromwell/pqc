@@ -247,7 +247,10 @@ void validate_luks2_plan_internal(const Luks2Plan& plan) {
     }
 }
 
-void detail::validate_lsblk_safety_json(const std::string& report) {
+void detail::validate_lsblk_safety_json(const std::string& report,
+                                       const std::string& expected_device,
+                                       unsigned int expected_major,
+                                       unsigned int expected_minor) {
     json::Value parsed;
     try {
         parsed = json::Value::parse(report);
@@ -257,56 +260,58 @@ void detail::validate_lsblk_safety_json(const std::string& report) {
     const auto& root = parsed.expect_object("lsblk report");
     const auto block_devices = root.find("blockdevices");
     if (block_devices == root.end() || !block_devices->second.is_array() ||
-        block_devices->second.as_array().empty()) {
-        throw EnvelopeError("block device was not found during final safety check");
+        block_devices->second.as_array().size() != 1) {
+        throw EnvelopeError("safety report must contain exactly one target device");
     }
-    std::vector<const json::Value*> pending;
-    for (const auto& node : block_devices->second.as_array()) {
-        pending.push_back(&node);
+    const auto& object = block_devices->second.as_array().front().expect_object("lsblk device");
+    const auto require_string = [&](const char* name) -> const std::string& {
+        const auto field = object.find(name);
+        if (field == object.end() || !field->second.is_string() || field->second.as_string().empty()) {
+            throw EnvelopeError(std::string("missing or invalid safety field: ") + name);
+        }
+        return field->second.as_string();
+    };
+    if (require_string("path") != expected_device ||
+        require_string("maj:min") != std::to_string(expected_major) + ":" + std::to_string(expected_minor)) {
+        throw EnvelopeError("safety report does not match the planned block device");
     }
-    std::size_t index = 0;
-    while (index < pending.size()) {
-        const json::Value& node = *pending[index];
-        const auto& object = node.expect_object("lsblk device");
-        const auto mounts = object.find("mountpoints");
-        if (mounts != object.end() && !mounts->second.is_null()) {
-            if (mounts->second.is_string() && !mounts->second.as_string().empty()) {
-                throw EnvelopeError("refusing to format a mounted device");
-            }
-            if (mounts->second.is_array()) {
-                for (const auto& mount : mounts->second.as_array()) {
-                    if (!mount.is_null() && mount.is_string() && !mount.as_string().empty()) {
-                        throw EnvelopeError("refusing to format a mounted device or one with mounted children");
-                    }
-                }
-            }
+    require_string("type");
+    const auto mounts = object.find("mountpoints");
+    if (mounts == object.end() || !mounts->second.is_array()) {
+        throw EnvelopeError("missing or invalid mount state in safety report");
+    }
+    for (const auto& mount : mounts->second.as_array()) {
+        if (!mount.is_null() && !mount.is_string()) {
+            throw EnvelopeError("invalid mount entry in safety report");
         }
-        if (index > 0) {
-            throw EnvelopeError("refusing to format a device with active child mappings");
+        if (mount.is_string() && !mount.as_string().empty()) {
+            throw EnvelopeError("refusing to format a mounted device");
         }
-        const auto children = object.find("children");
-        if (children != object.end() && children->second.is_array()) {
-            for (const auto& child : children->second.as_array()) {
-                pending.push_back(&child);
-            }
+    }
+    const auto children = object.find("children");
+    if (children != object.end()) {
+        if (!children->second.is_array()) {
+            throw EnvelopeError("invalid child-device state in safety report");
         }
-        ++index;
+        if (!children->second.as_array().empty()) {
+            throw EnvelopeError("refusing to format a device with child devices");
+        }
     }
 }
 
 void validate_format_target_unused_internal(const Luks2Plan& plan) {
     const ProcessResult probe = run_process(
-        {"lsblk", "--json", "--paths", "--output", "PATH,TYPE,MOUNTPOINTS", plan.device()}, true, 10);
+        {"lsblk", "--json", "--tree", "--paths", "--output", "PATH,TYPE,MAJ:MIN,MOUNTPOINTS", plan.device()}, true, 10);
     if (probe.exit_code != 0) {
         throw EnvelopeError("unable to verify block-device mount and holder state");
     }
-    detail::validate_lsblk_safety_json(probe.output);
+    detail::validate_lsblk_safety_json(probe.output, plan.device_, plan.major_, plan.minor_);
 
     const std::filesystem::path holders = std::filesystem::path("/sys/dev/block") /
         (std::to_string(plan.major_) + ":" + std::to_string(plan.minor_)) / "holders";
     std::error_code error;
     const bool holders_directory = std::filesystem::is_directory(holders, error);
-    if (error) throw EnvelopeError("unable to inspect block-device holders");
+    if (error || !holders_directory) throw EnvelopeError("unable to inspect block-device holders");
     if (holders_directory) {
         for (std::filesystem::directory_iterator item(holders, error), end; !error && item != end; item.increment(error)) {
             throw EnvelopeError("refusing to format a block device with active holders");

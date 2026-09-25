@@ -626,6 +626,7 @@ int main(int argc, char* argv[]) {
     }
 
     try {
+        const CryptoContext context(args.provider);
         if (args.command == "disk") return run_disk(args);
         if (args.command == "hardware") {
             if (args.hardware_action != "doctor") {
@@ -635,16 +636,11 @@ int main(int argc, char* argv[]) {
             std::cout << qprotect::cpp::hardware_report_text();
             return 0;
         }
-        const CryptoContext context(args.provider);
         if (args.command == "doctor") {
             return run_diagnostics(context, false);
         }
         if (args.command == "selftest") {
             return run_diagnostics(context, true);
-        }
-        const qprotect::cpp::SelfTestReport health = qprotect::cpp::run_self_tests(context);
-        if (!health.passed) {
-            throw CryptoError("required algorithm self-test failed");
         }
         if (args.command == "keygen") {
             return run_keygen(context, args);

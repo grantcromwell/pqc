@@ -319,6 +319,7 @@ void test_secure_bytes() {
 
 void test_context() {
     CHECK_THROWS(CryptoError, CryptoContext("bogus"));
+    CHECK_THROWS(CryptoError, CryptoContext("base"));
     const CryptoContext context;
     CHECK(context.provider_name() == "default");
     CHECK_NO_THROW(context.assert_ready());
@@ -637,7 +638,11 @@ void test_envelope_serialization(const CryptoContext& context) {
     CHECK_THROWS(EnvelopeError, Envelope::from_json(replace_once(json, "\"aead\": \"AES-256-GCM\"", "\"aead\": \"AES-128-GCM\"")));
     CHECK_THROWS(EnvelopeError, Envelope::from_json(replace_once(json, "\"ciphertext\": \"", "\"ciphertext\": \"!!!")));
     CHECK_THROWS(EnvelopeError, Envelope::from_json(replace_once(json, "\"key_id\": \"", "\"key_id\": \"ZZZZ")));
-    CHECK_THROWS(EnvelopeError, Envelope::from_json(replace_once(json, "\"payload_iv\": \"", "\"payload_iv\": \"AAAA\"")));
+    qprotect::cpp::json::Object invalid_nonce = qprotect::cpp::json::Value::parse(json).as_object();
+    invalid_nonce["payload_iv"] = qprotect::cpp::json::Value("AAAA");
+    const std::string invalid_nonce_json = qprotect::cpp::json::Value(std::move(invalid_nonce)).canonical();
+    CHECK_NO_THROW(qprotect::cpp::json::Value::parse(invalid_nonce_json));
+    CHECK_THROWS(EnvelopeError, Envelope::from_json(invalid_nonce_json));
     CHECK_THROWS(EnvelopeError, Envelope::from_json(replace_once(
         json, "\"version\": 1", "\"unknown\": 1,\n  \"version\": 1")));
     CHECK_THROWS(EnvelopeError, Envelope::from_json(replace_once(
@@ -766,17 +771,93 @@ void test_disk_plan_helpers() {
 }
 
 void test_disk_safety_report_validation() {
-    const auto validate = [](const std::string& report) {
-        qprotect::cpp::detail::validate_lsblk_safety_json(report);
+    using qprotect::cpp::json::Value;
+    using qprotect::cpp::json::Object;
+    using qprotect::cpp::json::Array;
+    const auto validate = [](const std::string& input) {
+        qprotect::cpp::detail::validate_lsblk_safety_json(input, "/dev/fake", 8, 1);
     };
-    CHECK_NO_THROW(validate(R"({"blockdevices":[{"path":"/dev/fake","mountpoints":[null]}]})"));
+    const Object device = Value::parse(
+        R"({"path":"/dev/fake","type":"disk","maj:min":"8:1","mountpoints":[null]})").as_object();
+    const auto document = [](const Object& entry) {
+        return Value(Object{{"blockdevices", Value(Array{Value(entry)})}}).canonical();
+    };
+    CHECK_NO_THROW(validate(document(device)));
     CHECK_THROWS(EnvelopeError, validate("not json"));
     CHECK_THROWS(EnvelopeError, validate(R"({"blockdevices":[]})"));
-    CHECK_THROWS(EnvelopeError, validate(R"({"blockdevices":[{"mountpoints":["/mnt/data"]}]})"));
-    CHECK_THROWS(EnvelopeError, validate(
-        R"({"blockdevices":[{"mountpoints":[null],"children":[{"mountpoints":["/boot"]}]}]})"));
-    CHECK_THROWS(EnvelopeError, validate(
-        R"({"blockdevices":[{"mountpoints":[null],"children":[{"mountpoints":[null]}]}]})"));
+    CHECK_THROWS(EnvelopeError, validate(R"({"blockdevices":[{}]})"));
+    for (const char* field : {"path", "type", "maj:min", "mountpoints"}) {
+        Object missing = device;
+        missing.erase(field);
+        CHECK_THROWS(EnvelopeError, validate(document(missing)));
+    }
+    const std::vector<std::pair<std::string, Value>> invalid_fields = {
+        {"path", Value("/dev/other")},
+        {"path", Value(nullptr)},
+        {"type", Value(42)},
+        {"type", Value("")},
+        {"maj:min", Value("8:2")},
+        {"maj:min", Value("9:1")},
+        {"maj:min", Value(8)},
+        {"mountpoints", Value(nullptr)},
+        {"mountpoints", Value(42)},
+        {"mountpoints", Value("")},
+        {"mountpoints", Value(Array{Value(true)})},
+        {"mountpoints", Value(Array{Value(42)})},
+        {"mountpoints", Value(Array{Value("/fixture-mount")})},
+        {"children", Value(Object{})},
+        {"children", Value(nullptr)},
+        {"children", Value(Array{Value(Object{})})},
+        {"children", Value(Array{Value::parse(R"({"mountpoints":["/fixture-mount"]})")})},
+    };
+    for (const auto& [field, value] : invalid_fields) {
+        Object invalid = device;
+        invalid[field] = value;
+        CHECK_THROWS(EnvelopeError, validate(document(invalid)));
+    }
+    CHECK_THROWS(EnvelopeError, validate(Value(Object{
+        {"blockdevices", Value(Array{Value(device), Value(device)})}}).canonical()));
+    Object no_children = device;
+    no_children["children"] = Value(Array{});
+    CHECK_NO_THROW(validate(document(no_children)));
+}
+
+void test_unsigned_envelope_tampering(const CryptoContext& context) {
+    const KEMKeyPair recipient = generate_ml_kem_1024(context);
+    const SecureBytes payload = bytes("unsigned envelope authentication test");
+    const Envelope envelope = encrypt_envelope(
+        context, payload, options_for({recipient.public_key_der}, "tamper-test"));
+    const DecryptOptions options{recipient.private_key_der, std::nullopt};
+    CHECK(!envelope.signature.has_value());
+    CHECK(decrypt_envelope(context, Envelope::from_json(envelope.to_json()), options) == payload);
+    const auto reject = [&](const Envelope& changed) {
+        const Envelope parsed = Envelope::from_json(changed.to_json());
+        CHECK_THROWS(EnvelopeError, decrypt_envelope(context, parsed, options));
+    };
+    Envelope changed = envelope;
+    changed.ciphertext[0] ^= 1;
+    reject(changed);
+    changed = envelope;
+    changed.tag[0] ^= 1;
+    reject(changed);
+    changed = envelope;
+    changed.payload_iv[0] ^= 1;
+    reject(changed);
+    changed = envelope;
+    changed.recipients[0].kem_ciphertext[0] ^= 1;
+    reject(changed);
+    changed = envelope;
+    changed.recipients[0].wrap_iv[0] ^= 1;
+    reject(changed);
+    changed = envelope;
+    changed.recipients[0].wrapped_key[0] ^= 1;
+    reject(changed);
+    changed = envelope;
+    changed.recipients[0].wrap_tag[0] ^= 1;
+    reject(changed);
+    changed = envelope;
+    changed.context = "different-context";
+    reject(changed);
 }
 
 void test_hardware_report_schema(const std::string& report_text) {
@@ -898,6 +979,7 @@ int main() {
         test_identity_normalization();
         test_envelope_roundtrip(context);
         test_envelope_failures(context);
+        test_unsigned_envelope_tampering(context);
         test_envelope_serialization(context);
         test_key_files(context);
         test_private_key_envelopes(context);
