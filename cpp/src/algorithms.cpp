@@ -36,6 +36,10 @@ using SignaturePtr = FunctionPtr<EVP_SIGNATURE, EVP_SIGNATURE_free>;
 using PKeyPtr = FunctionPtr<EVP_PKEY, EVP_PKEY_free>;
 using PKeyCtxPtr = FunctionPtr<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
 
+constexpr std::size_t kMaximumKeyDerLength = 1024 * 1024;
+constexpr std::size_t kMlKem1024CiphertextLength = 1568;
+constexpr std::size_t kMlKemSharedSecretLength = 32;
+
 struct SecureOpenSSLFree {
     std::size_t length = 0;
     void operator()(unsigned char* value) const noexcept {
@@ -74,6 +78,9 @@ SecureDerBuffer encode_public_key(EVP_PKEY* key) {
 
 PKeyPtr load_private_key(const CryptoContextHandles& handles,
                          std::span<const unsigned char> private_key_der) {
+    if (private_key_der.empty() || private_key_der.size() > kMaximumKeyDerLength) {
+        throw CryptoError("private key DER must be between 1 byte and 1 MiB");
+    }
     const unsigned char* cursor = private_key_der.data();
     EVP_PKEY* key = d2i_AutoPrivateKey_ex(
         nullptr,
@@ -85,11 +92,18 @@ PKeyPtr load_private_key(const CryptoContextHandles& handles,
     if (key == nullptr) {
         throw_openssl("d2i_AutoPrivateKey_ex");
     }
-    return PKeyPtr(key);
+    PKeyPtr parsed(key);
+    if (cursor != private_key_der.data() + private_key_der.size()) {
+        throw CryptoError("trailing data after private key DER");
+    }
+    return parsed;
 }
 
 PKeyPtr load_public_key(const CryptoContextHandles& handles,
                         std::span<const unsigned char> public_key_der) {
+    if (public_key_der.empty() || public_key_der.size() > kMaximumKeyDerLength) {
+        throw CryptoError("public key DER must be between 1 byte and 1 MiB");
+    }
     const unsigned char* cursor = public_key_der.data();
     EVP_PKEY* key = d2i_PUBKEY_ex(
         nullptr,
@@ -101,7 +115,11 @@ PKeyPtr load_public_key(const CryptoContextHandles& handles,
     if (key == nullptr) {
         throw_openssl("d2i_PUBKEY_ex");
     }
-    return PKeyPtr(key);
+    PKeyPtr parsed(key);
+    if (cursor != public_key_der.data() + public_key_der.size()) {
+        throw CryptoError("trailing data after public key DER");
+    }
+    return parsed;
 }
 
 std::string to_hex(std::span<const unsigned char> input) {
@@ -521,12 +539,41 @@ KEMKeyPair generate_ml_kem_1024(const CryptoContext& context) {
     };
 }
 
+MlKem1024PublicKey::MlKem1024PublicKey(
+    const CryptoContext& context,
+    std::span<const unsigned char> public_key_der
+) {
+    const PKeyPtr key = load_public_key(context.handles(), public_key_der);
+    if (EVP_PKEY_is_a(key.get(), "ML-KEM-1024") != 1) {
+        throw CryptoError("public key must use ML-KEM-1024");
+    }
+    der_.assign(public_key_der);
+}
+
+MlKem1024PrivateKey::MlKem1024PrivateKey(
+    const CryptoContext& context,
+    std::span<const unsigned char> private_key_der
+) {
+    const PKeyPtr key = load_private_key(context.handles(), private_key_der);
+    if (EVP_PKEY_is_a(key.get(), "ML-KEM-1024") != 1) {
+        throw CryptoError("private key must use ML-KEM-1024");
+    }
+    der_.assign(private_key_der);
+}
+
 KEMEncapsulation encapsulate_ml_kem_1024(
     const CryptoContext& context,
     std::span<const unsigned char> public_key_der
 ) {
+    return encapsulate_ml_kem_1024(context, MlKem1024PublicKey(context, public_key_der));
+}
+
+KEMEncapsulation encapsulate_ml_kem_1024(
+    const CryptoContext& context,
+    const MlKem1024PublicKey& validated_key
+) {
     const CryptoContextHandles handles = context.handles();
-    PKeyPtr public_key = load_public_key(handles, public_key_der);
+    PKeyPtr public_key = load_public_key(handles, validated_key.der_);
     PKeyCtxPtr key_context(
         EVP_PKEY_CTX_new_from_pkey(handles.libctx, public_key.get(), handles.properties)
     );
@@ -549,6 +596,10 @@ KEMEncapsulation encapsulate_ml_kem_1024(
         throw_openssl("EVP_PKEY_encapsulate(length)");
     }
 
+    if (ciphertext_length != kMlKem1024CiphertextLength ||
+        shared_secret_length != kMlKemSharedSecretLength) {
+        throw CryptoError("invalid ML-KEM-1024 encapsulation lengths");
+    }
     SecureBytes ciphertext(ciphertext_length);
     SecureBytes shared_secret(shared_secret_length);
     if (EVP_PKEY_encapsulate(
@@ -560,8 +611,10 @@ KEMEncapsulation encapsulate_ml_kem_1024(
         ) != 1) {
         throw_openssl("EVP_PKEY_encapsulate");
     }
-    ciphertext.resize(ciphertext_length);
-    shared_secret.resize(shared_secret_length);
+    if (ciphertext_length != kMlKem1024CiphertextLength ||
+        shared_secret_length != kMlKemSharedSecretLength) {
+        throw CryptoError("invalid ML-KEM-1024 encapsulation lengths");
+    }
     return KEMEncapsulation{std::move(ciphertext), std::move(shared_secret)};
 }
 
@@ -570,8 +623,19 @@ SecureBytes decapsulate_ml_kem_1024(
     std::span<const unsigned char> private_key_der,
     std::span<const unsigned char> ciphertext
 ) {
+    return decapsulate_ml_kem_1024(context, MlKem1024PrivateKey(context, private_key_der), ciphertext);
+}
+
+SecureBytes decapsulate_ml_kem_1024(
+    const CryptoContext& context,
+    const MlKem1024PrivateKey& validated_key,
+    std::span<const unsigned char> ciphertext
+) {
+    if (ciphertext.size() != kMlKem1024CiphertextLength) {
+        throw CryptoError("ML-KEM-1024 requires a 1568-byte ciphertext");
+    }
     const CryptoContextHandles handles = context.handles();
-    PKeyPtr private_key = load_private_key(handles, private_key_der);
+    PKeyPtr private_key = load_private_key(handles, validated_key.der_);
     PKeyCtxPtr key_context(
         EVP_PKEY_CTX_new_from_pkey(handles.libctx, private_key.get(), handles.properties)
     );
@@ -593,6 +657,9 @@ SecureBytes decapsulate_ml_kem_1024(
         throw_openssl("EVP_PKEY_decapsulate(length)");
     }
 
+    if (shared_secret_length != kMlKemSharedSecretLength) {
+        throw CryptoError("invalid ML-KEM-1024 shared-secret length");
+    }
     SecureBytes shared_secret(shared_secret_length);
     if (EVP_PKEY_decapsulate(
             key_context.get(),
@@ -603,7 +670,9 @@ SecureBytes decapsulate_ml_kem_1024(
         ) != 1) {
         throw_openssl("EVP_PKEY_decapsulate");
     }
-    shared_secret.resize(shared_secret_length);
+    if (shared_secret_length != kMlKemSharedSecretLength) {
+        throw CryptoError("invalid ML-KEM-1024 shared-secret length");
+    }
     return shared_secret;
 }
 

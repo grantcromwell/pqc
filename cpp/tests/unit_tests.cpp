@@ -18,6 +18,10 @@
 #include "identity.hpp"
 #include "hardware_internal.hpp"
 #include "disk_internal.hpp"
+#include "crypto_context_handles.hpp"
+
+#include <openssl/evp.h>
+#include <openssl/x509.h>
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -27,6 +31,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <span>
 #include <string>
@@ -264,6 +269,74 @@ void test_ml_kem(const CryptoContext& context) {
 }
 
 // ---------------------------------------------------------------- ML-DSA
+
+void test_ml_kem_key_validation(const CryptoContext& context) {
+    using qprotect::cpp::MlKem1024PublicKey;
+    using qprotect::cpp::MlKem1024PrivateKey;
+    const KEMKeyPair key_pair = generate_ml_kem_1024(context);
+    SecureBytes public_source = key_pair.public_key_der;
+    SecureBytes private_source = key_pair.private_key_der;
+    const MlKem1024PublicKey public_key(context, public_source);
+    const MlKem1024PrivateKey private_key(context, private_source);
+    public_source.clear();
+    private_source.clear();
+    const KEMEncapsulation encapsulation = encapsulate_ml_kem_1024(context, public_key);
+    CHECK(encapsulation.ciphertext.size() == 1568);
+    CHECK(encapsulation.shared_secret.size() == 32);
+    CHECK(decapsulate_ml_kem_1024(context, private_key, encapsulation.ciphertext) ==
+          encapsulation.shared_secret);
+    CHECK(decapsulate_ml_kem_1024(context, key_pair.private_key_der, encapsulation.ciphertext) ==
+          encapsulation.shared_secret);
+
+    for (const std::size_t length : {0, 768, 1088, 1567, 1569}) {
+        CHECK_THROWS(CryptoError, decapsulate_ml_kem_1024(context, private_key, SecureBytes(length)));
+    }
+    CHECK_THROWS(CryptoError, MlKem1024PublicKey(context, key_pair.private_key_der));
+    CHECK_THROWS(CryptoError, MlKem1024PrivateKey(context, key_pair.public_key_der));
+    CHECK_THROWS(CryptoError, MlKem1024PublicKey(context, SecureBytes{}));
+    CHECK_THROWS(CryptoError, MlKem1024PrivateKey(context, SecureBytes{}));
+    CHECK_THROWS(CryptoError, MlKem1024PublicKey(context, SecureBytes(1024 * 1024 + 1)));
+    CHECK_THROWS(CryptoError, MlKem1024PrivateKey(context, SecureBytes(1024 * 1024 + 1)));
+
+    SecureBytes trailing_public = key_pair.public_key_der;
+    SecureBytes trailing_private = key_pair.private_key_der;
+    trailing_public.resize(trailing_public.size() + 1);
+    trailing_private.resize(trailing_private.size() + 1);
+    CHECK_THROWS(CryptoError, MlKem1024PublicKey(context, trailing_public));
+    CHECK_THROWS(CryptoError, MlKem1024PrivateKey(context, trailing_private));
+    CHECK_THROWS(CryptoError, encapsulate_ml_kem_1024(context, trailing_public));
+    CHECK_THROWS(CryptoError,
+        decapsulate_ml_kem_1024(context, trailing_private, encapsulation.ciphertext));
+
+    const auto handles = context.handles();
+    for (const char* algorithm : {"ML-KEM-512", "ML-KEM-768", "ML-DSA-87"}) {
+        std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> other(
+            EVP_PKEY_Q_keygen(handles.libctx, handles.properties, algorithm), EVP_PKEY_free);
+        if (!other) throw CryptoError("unable to generate validation fixture");
+        const int public_length = i2d_PUBKEY(other.get(), nullptr);
+        const int private_length = i2d_PrivateKey(other.get(), nullptr);
+        if (public_length <= 0 || private_length <= 0) {
+            throw CryptoError("unable to size validation fixture");
+        }
+        SecureBytes other_public(static_cast<std::size_t>(public_length));
+        SecureBytes other_private(static_cast<std::size_t>(private_length));
+        unsigned char* public_cursor = other_public.data();
+        unsigned char* private_cursor = other_private.data();
+        if (i2d_PUBKEY(other.get(), &public_cursor) != public_length ||
+            i2d_PrivateKey(other.get(), &private_cursor) != private_length) {
+            throw CryptoError("unable to encode validation fixture");
+        }
+        CHECK_THROWS(CryptoError, MlKem1024PublicKey(context, other_public));
+        CHECK_THROWS(CryptoError, MlKem1024PrivateKey(context, other_private));
+        CHECK_THROWS(CryptoError, encapsulate_ml_kem_1024(context, other_public));
+        CHECK_THROWS(CryptoError,
+            decapsulate_ml_kem_1024(context, other_private, encapsulation.ciphertext));
+        EncryptOptions options;
+        options.context = "key-validation";
+        options.recipient_public_key_der.push_back(other_public);
+        CHECK_THROWS(CryptoError, encrypt_envelope(context, bytes("test payload"), options));
+    }
+}
 
 void test_ml_dsa(const CryptoContext& context) {
     const SignatureKeyPair key_pair = generate_ml_dsa_87(context);
@@ -971,6 +1044,7 @@ int main() {
         test_hkdf(context);
         test_aes_gcm(context);
         test_ml_kem(context);
+        test_ml_kem_key_validation(context);
         test_ml_dsa(context);
         test_secure_bytes();
         test_context();

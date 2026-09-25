@@ -65,7 +65,7 @@ $(BUILD_DIR)/qprotect_tool.o: apps/qprotect_tool.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -Iinclude -Isrc -c $< -o $@
 
 $(BUILD_DIR)/unit_tests.o: tests/unit_tests.cpp | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -Iinclude -Isrc -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -Isrc -c $< -o $@
 
 $(BUILD_DIR)/native_integration.o: tests/native_integration.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@

@@ -23,6 +23,36 @@ struct KEMEncapsulation {
     SecureBytes shared_secret;
 };
 
+class MlKem1024PublicKey {
+public:
+    MlKem1024PublicKey(const CryptoContext& context,
+                      std::span<const unsigned char> public_key_der);
+
+private:
+    SecureBytes der_;
+    friend KEMEncapsulation encapsulate_ml_kem_1024(
+        const CryptoContext&, const MlKem1024PublicKey&);
+};
+
+class MlKem1024PrivateKey {
+public:
+    MlKem1024PrivateKey(const CryptoContext& context,
+                       std::span<const unsigned char> private_key_der);
+
+private:
+    SecureBytes der_;
+    friend SecureBytes decapsulate_ml_kem_1024(
+        const CryptoContext&, const MlKem1024PrivateKey&,
+        std::span<const unsigned char>);
+};
+
+KEMEncapsulation encapsulate_ml_kem_1024(const CryptoContext& context,
+                                       const MlKem1024PublicKey& public_key);
+
+SecureBytes decapsulate_ml_kem_1024(const CryptoContext& context,
+                                  const MlKem1024PrivateKey& private_key,
+                                  std::span<const unsigned char> ciphertext);
+
 struct SignatureKeyPair {
     SecureBytes private_key_der;
     SecureBytes public_key_der;
