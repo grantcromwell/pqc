@@ -74,6 +74,10 @@ void usage(std::ostream& out) {
         << "           [--signer PRIVPEM] [--context STR]\n"
         << "  decrypt  --input PATH --output PATH --recipient-private PRIVPEM\n"
         << "           [--signer-public PUBPEM]\n"
+        << "  key-encrypt --input PRIVATE-PEM --output QPE --recipient KEM-PUBPEM\n"
+        << "              --signer ML-DSA-PRIVPEM [--recipient KEM-PUBPEM ...]\n"
+        << "  key-decrypt --input QPE --output PRIVATE-PEM --recipient-private KEM-PRIVPEM\n"
+        << "              --signer-public ML-DSA-PUBPEM\n"
         << "  identity-encrypt --input JSON --output QPE --recipient PEM [--signer PRIVPEM]\n"
         << "  identity-decrypt --input QPE --output JSON --recipient-private PRIVPEM\n"
         << "           [--signer-public PUBPEM]\n"
@@ -436,6 +440,58 @@ int run_decrypt(const CryptoContext& context, const Arguments& args) {
     return 0;
 }
 
+int run_key_encrypt(const CryptoContext& context, const Arguments& args) {
+    if (args.input_path.empty() || args.output_path.empty() || args.recipients.empty() ||
+        args.signer_private_path.empty()) {
+        std::cerr << "error: key-encrypt requires --input, --output, --recipient, and --signer\n";
+        return 2;
+    }
+    reject_same_path(args.input_path, args.output_path);
+
+    const SecureBytes private_key = qprotect::cpp::load_private_key_file(context, args.input_path);
+    qprotect::cpp::EncryptOptions options;
+    options.context = "private-key";
+    for (const std::string& recipient : args.recipients) {
+        options.recipient_public_key_der.push_back(
+            qprotect::cpp::load_public_key_file(context, recipient));
+    }
+    options.signer_private_key_der = qprotect::cpp::load_private_key_file(
+        context, args.signer_private_path);
+
+    const Envelope envelope = qprotect::cpp::encrypt_envelope(context, private_key, options);
+    const std::string json = envelope.to_json();
+    write_binary_file(
+        args.output_path,
+        std::span<const unsigned char>(
+            reinterpret_cast<const unsigned char*>(json.data()), json.size()),
+        args.force);
+    return 0;
+}
+
+int run_key_decrypt(const CryptoContext& context, const Arguments& args) {
+    if (args.input_path.empty() || args.output_path.empty() ||
+        args.recipient_private_path.empty() || args.signer_public_path.empty()) {
+        std::cerr << "error: key-decrypt requires --input, --output, --recipient-private, and --signer-public\n";
+        return 2;
+    }
+    reject_same_path(args.input_path, args.output_path);
+
+    const Envelope envelope = Envelope::from_json(read_text_file(args.input_path));
+    if (envelope.context != "private-key") {
+        throw EnvelopeError("envelope is not a protected private key");
+    }
+    qprotect::cpp::DecryptOptions options;
+    options.recipient_private_key_der = qprotect::cpp::load_private_key_file(
+        context, args.recipient_private_path);
+    options.signer_public_key_der = qprotect::cpp::load_public_key_file(
+        context, args.signer_public_path);
+    options.require_signature = true;
+
+    const SecureBytes private_key = qprotect::cpp::decrypt_envelope(context, envelope, options);
+    qprotect::cpp::write_private_key_pem(context, private_key, args.output_path, args.force);
+    return 0;
+}
+
 struct WipeString {
     std::string& value;
     ~WipeString() {
@@ -599,6 +655,12 @@ int main(int argc, char* argv[]) {
         }
         if (args.command == "decrypt") {
             return run_decrypt(context, args);
+        }
+        if (args.command == "key-encrypt") {
+            return run_key_encrypt(context, args);
+        }
+        if (args.command == "key-decrypt") {
+            return run_key_decrypt(context, args);
         }
         if (args.command == "identity-encrypt") {
             return run_identity_encrypt(context, args);

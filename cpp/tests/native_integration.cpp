@@ -72,6 +72,25 @@ int main(int argc, char** argv) {
                          "--public", path("signer.pub").string()}) == 0,
                     "native signing key generation");
 
+    passed &= check(run({tool, "key-encrypt", "--input", path("recipient.pem").string(),
+                         "--output", path("recipient.qpe").string(), "--recipient",
+                         path("other.pub").string(), "--signer", path("signer.pem").string()}) == 0 &&
+                    read_file(path("recipient.qpe")).find("BEGIN PRIVATE KEY") == std::string::npos,
+                    "private key encryption with KEM and signature");
+    passed &= check(run({tool, "key-decrypt", "--input", path("recipient.qpe").string(),
+                         "--output", path("recovered-key.pem").string(), "--recipient-private",
+                         path("other.pem").string(), "--signer-public", path("signer.pub").string()}) == 0 &&
+                    read_file(path("recovered-key.pem")).find("BEGIN PRIVATE KEY") != std::string::npos,
+                    "signed private key decryption");
+    passed &= check(run({tool, "encrypt", "--input", path("recipient.pem").string(), "--output",
+                         path("unsigned-key.qpe").string(), "--recipient", path("other.pub").string(),
+                         "--context", "private-key"}) == 0 &&
+                    run({tool, "key-decrypt", "--input", path("unsigned-key.qpe").string(),
+                         "--output", path("unsigned-recovered.pem").string(), "--recipient-private",
+                         path("other.pem").string(), "--signer-public", path("signer.pub").string()}) != 0 &&
+                    !std::filesystem::exists(path("unsigned-recovered.pem")),
+                    "unsigned private key envelope rejected");
+
     const std::string message = "qprotect C++20 integration payload\n";
     { std::ofstream stream(path("plain.bin"), std::ios::binary); stream << message; }
     passed &= check(run({tool, "encrypt", "--input", path("plain.bin").string(), "--output",
