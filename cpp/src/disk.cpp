@@ -20,6 +20,7 @@
 #include <cerrno>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <string_view>
@@ -38,27 +39,25 @@ struct ProcessResult {
     std::string output;
 };
 
-bool executable_in_path(const std::string& name) {
-    const char* raw_path = std::getenv("PATH");
-    if (raw_path == nullptr) {
-        return false;
-    }
-    std::stringstream paths(raw_path);
-    std::string directory;
-    while (std::getline(paths, directory, ':')) {
-        if (directory.empty()) {
-            directory = ".";
-        }
-        if (::access((std::filesystem::path(directory) / name).c_str(), X_OK) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
+class FileDescriptor {
+public:
+    explicit FileDescriptor(int fd) : fd_(fd) {}
+    ~FileDescriptor() { if (fd_ >= 0) ::close(fd_); }
+
+    FileDescriptor(const FileDescriptor&) = delete;
+    FileDescriptor& operator=(const FileDescriptor&) = delete;
+
+    int get() const { return fd_; }
+    int release() { const int fd = fd_; fd_ = -1; return fd; }
+
+private:
+    int fd_;
+};
 
 ProcessResult run_process(const std::vector<std::string>& arguments,
                           bool capture,
-                          int timeout_seconds = 0) {
+                          int timeout_seconds = 0,
+                          int inherited_fd = -1) {
     if (arguments.empty()) {
         throw EnvelopeError("empty external command");
     }
@@ -87,7 +86,14 @@ ProcessResult run_process(const std::vector<std::string>& arguments,
             argv.push_back(const_cast<char*>(argument.c_str()));
         }
         argv.push_back(nullptr);
-        ::execvp(argv[0], argv.data());
+        if (inherited_fd >= 0 && ::fcntl(inherited_fd, F_SETFD, 0) < 0) _exit(127);
+
+        char locale[] = "LC_ALL=C";
+        char language[] = "LANG=C";
+        char path[] = "PATH=/usr/sbin:/usr/bin:/sbin:/bin";
+        char* environment[] = {locale, language, path, nullptr};
+
+        ::execve(argv[0], argv.data(), environment);
         _exit(127);
     }
 
@@ -173,6 +179,9 @@ DeviceIdentity validate_device(const std::string& path) {
 
 void validate_key_file(const std::string& path) {
     const std::filesystem::path file(path);
+    if (!file.is_absolute() || path.find('\0') != std::string::npos) {
+        throw EnvelopeError("key file must be an absolute path");
+    }
     std::error_code error;
     const auto link_status = std::filesystem::symlink_status(file, error);
     if (error || std::filesystem::is_symlink(link_status) || !std::filesystem::is_regular_file(link_status)) {
@@ -188,7 +197,7 @@ void validate_key_file(const std::string& path) {
 }
 
 void validate_mapper(const std::string& name) {
-    if (name.empty() || name.size() > 64) {
+    if (name.empty() || name.size() > 64 || name.front() == '-' || name == "." || name == "..") {
         throw EnvelopeError("mapper name must be 1..64 characters");
     }
     for (const unsigned char c : name) {
@@ -209,12 +218,12 @@ void validate_options(const DiskPlanOptions& options) {
         throw EnvelopeError("sector size must be 512, 1024, 2048, or 4096");
     }
     if (options.argon2_memory_kib &&
-        (*options.argon2_memory_kib < 1 || *options.argon2_memory_kib > 4 * 1024 * 1024)) {
-        throw EnvelopeError("Argon2 memory must be between 1 and 4194304 KiB");
+        (*options.argon2_memory_kib < 32 || *options.argon2_memory_kib > 4 * 1024 * 1024)) {
+        throw EnvelopeError("Argon2 memory must be between 32 and 4194304 KiB");
     }
     if (options.argon2_parallelism &&
-        (*options.argon2_parallelism < 1 || *options.argon2_parallelism > 1024)) {
-        throw EnvelopeError("Argon2 parallelism must be between 1 and 1024");
+        (*options.argon2_parallelism < 1 || *options.argon2_parallelism > 4)) {
+        throw EnvelopeError("Argon2 parallelism must be between 1 and 4");
     }
     if (options.integrity) {
         if (options.integrity->empty() || options.integrity->size() > 64) {
@@ -234,6 +243,154 @@ void validate_options(const DiskPlanOptions& options) {
 
 } // namespace
 
+std::string detail::trusted_disk_executable(const std::string& name) {
+    if (name != "cryptsetup" && name != "lsblk") {
+        throw EnvelopeError("unsupported disk utility");
+    }
+
+    for (const char* directory : {"/usr/sbin", "/usr/bin", "/sbin", "/bin"}) {
+        std::error_code error;
+        const auto executable = std::filesystem::canonical(std::filesystem::path(directory) / name, error);
+        if (error) continue;
+
+        struct stat status {};
+        if (::stat(executable.c_str(), &status) != 0 || !S_ISREG(status.st_mode) ||
+            ::access(executable.c_str(), X_OK) != 0) continue;
+
+        bool trusted = true;
+        for (auto path = executable; !path.empty(); path = path.parent_path()) {
+            if (::stat(path.c_str(), &status) != 0 || status.st_uid != 0 || (status.st_mode & 0022) != 0) {
+                trusted = false;
+                break;
+            }
+            if (path == path.root_path()) break;
+        }
+
+        if (trusted) return executable.string();
+    }
+
+    throw EnvelopeError("trusted system executable unavailable: " + name);
+}
+
+namespace {
+
+std::string file_identity(const struct stat& status) {
+    return std::to_string(status.st_dev) + ":" + std::to_string(status.st_ino);
+}
+
+int open_header_directory(const std::string& value) {
+    const std::filesystem::path path(value);
+    if (value.find('\0') != std::string::npos || !path.is_absolute() ||
+        path.filename().empty() || path.filename() == "." || path.filename() == "..") {
+        throw EnvelopeError("header path must be an absolute file path");
+    }
+
+    std::error_code error;
+    const auto parent = std::filesystem::canonical(path.parent_path(), error);
+    if (error || parent != path.parent_path()) {
+        throw EnvelopeError("header directory must be canonical and accessible");
+    }
+
+    FileDescriptor directory(::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    struct stat status {};
+    if (directory.get() < 0 || ::fstat(directory.get(), &status) != 0 ||
+        status.st_uid != ::geteuid() || (status.st_mode & 0022) != 0) {
+        throw EnvelopeError("header directory must be owned by this user and not writable by others");
+    }
+
+    return directory.release();
+}
+
+std::string inspect_header(int directory, const std::string& name, bool creating) {
+    struct stat parent {};
+    if (::fstat(directory, &parent) != 0) throw EnvelopeError("unable to inspect header directory");
+
+    struct stat status {};
+    const int result = ::fstatat(directory, name.c_str(), &status, AT_SYMLINK_NOFOLLOW);
+
+    if (creating) {
+        if (result == 0 || errno != ENOENT) {
+            throw EnvelopeError("format requires a new detached header file");
+        }
+        return file_identity(parent);
+    }
+
+    if (result != 0 || !S_ISREG(status.st_mode) || status.st_uid != ::geteuid() ||
+        (status.st_mode & 0077) != 0 || status.st_nlink != 1 || status.st_size == 0) {
+        throw EnvelopeError("header must be a nonempty private regular file owned by this user");
+    }
+
+    return file_identity(parent) + "/" + file_identity(status);
+}
+
+}
+
+std::string detail::header_identity(const std::string& path, bool creating) {
+    FileDescriptor directory(open_header_directory(path));
+    return inspect_header(directory.get(), std::filesystem::path(path).filename().string(), creating);
+}
+
+int detail::open_validated_header(const std::string& path, bool creating, const std::string& identity) {
+    FileDescriptor directory(open_header_directory(path));
+    const auto name = std::filesystem::path(path).filename().string();
+
+    if (inspect_header(directory.get(), name, creating) != identity) {
+        throw EnvelopeError("detached header identity changed after planning");
+    }
+
+    const int flags = O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | (creating ? O_RDWR | O_CREAT | O_EXCL : O_RDONLY);
+    FileDescriptor header(::openat(directory.get(), name.c_str(), flags, 0600));
+    if (header.get() < 0) throw EnvelopeError("unable to open validated detached header");
+
+    struct stat status {};
+    struct stat parent {};
+    if (::fstat(header.get(), &status) != 0 || ::fstat(directory.get(), &parent) != 0 ||
+        !S_ISREG(status.st_mode) || status.st_uid != ::geteuid() || (status.st_mode & 0077) != 0 ||
+        status.st_nlink != 1 || (!creating && file_identity(parent) + "/" + file_identity(status) != identity)) {
+        throw EnvelopeError("detached header changed while opening");
+    }
+
+    if (creating && ::ftruncate(header.get(), 32 * 1024 * 1024) != 0) {
+        throw EnvelopeError("unable to allocate detached header");
+    }
+
+    return header.release();
+}
+
+void detail::validate_mapping_device(const std::filesystem::path& root,
+                                    unsigned int mapping_major, unsigned int mapping_minor,
+                                    unsigned int device_major, unsigned int device_minor) {
+    std::string current = std::to_string(mapping_major) + ":" + std::to_string(mapping_minor);
+    const std::string expected = std::to_string(device_major) + ":" + std::to_string(device_minor);
+
+    std::ifstream uuid_file(root / current / "dm" / "uuid");
+    std::string uuid;
+    if (!std::getline(uuid_file, uuid) || !uuid.starts_with("CRYPT-LUKS2-")) {
+        throw EnvelopeError("mapping is not a LUKS2 device");
+    }
+
+    for (int depth = 0; depth < 16; ++depth) {
+        std::error_code error;
+        std::filesystem::directory_iterator entry(root / current / "slaves", error), end;
+        if (error || entry == end) throw EnvelopeError("unable to verify mapping backing device");
+
+        std::ifstream device_file(entry->path() / "dev");
+        std::string device;
+        if (!std::getline(device_file, device) || device.find_first_not_of("0123456789:") != std::string::npos ||
+            device.find(':') == std::string::npos) {
+            throw EnvelopeError("invalid mapping backing device");
+        }
+
+        entry.increment(error);
+        if (error || entry != end) throw EnvelopeError("mapping must have exactly one backing device");
+        if (device == expected) return;
+
+        current = device;
+    }
+
+    throw EnvelopeError("mapping does not resolve to the planned device");
+}
+
 void validate_luks2_plan_internal(const Luks2Plan& plan) {
     if (!plan.validated_) {
         throw EnvelopeError("operation requires a validated plan from build_luks2_plan");
@@ -244,6 +401,12 @@ void validate_luks2_plan_internal(const Luks2Plan& plan) {
     }
     if (plan.options_.key_file) {
         validate_key_file(*plan.options_.key_file);
+    }
+
+    if (plan.options_.header_file &&
+        detail::header_identity(*plan.options_.header_file, plan.options_.action == DiskAction::Format) !=
+            plan.header_identity_) {
+        throw EnvelopeError("detached header identity changed after planning");
     }
 }
 
@@ -301,7 +464,8 @@ void detail::validate_lsblk_safety_json(const std::string& report,
 
 void validate_format_target_unused_internal(const Luks2Plan& plan) {
     const ProcessResult probe = run_process(
-        {"lsblk", "--json", "--tree", "--paths", "--output", "PATH,TYPE,MAJ:MIN,MOUNTPOINTS", plan.device()}, true, 10);
+        {detail::trusted_disk_executable("lsblk"), "--json", "--tree", "--paths", "--output",
+         "PATH,TYPE,MAJ:MIN,MOUNTPOINTS", plan.device()}, true, 10);
     if (probe.exit_code != 0) {
         throw EnvelopeError("unable to verify block-device mount and holder state");
     }
@@ -327,11 +491,29 @@ void validate_format_target_unused_internal(const Luks2Plan& plan) {
 
 namespace {
 
-void execute(const std::vector<std::string>& arguments) {
-    const ProcessResult result = run_process(arguments, false);
+void execute(const std::vector<std::string>& arguments, int inherited_fd = -1) {
+    const ProcessResult result = run_process(arguments, false, 0, inherited_fd);
     if (result.exit_code != 0) {
         throw EnvelopeError(arguments.front() + " failed with exit code " + std::to_string(result.exit_code));
     }
+}
+
+void execute_with_header(std::vector<std::string> arguments, const DiskPlanOptions& options,
+                         const std::string& identity) {
+    if (!options.header_file) {
+        execute(arguments);
+        return;
+    }
+
+    FileDescriptor header(detail::open_validated_header(*options.header_file,
+                          options.action == DiskAction::Format, identity));
+    const auto option = std::find(arguments.begin(), arguments.end(), "--header");
+    if (option == arguments.end() || std::next(option) == arguments.end()) {
+        throw EnvelopeError("missing detached header argument");
+    }
+
+    *std::next(option) = "/proc/self/fd/" + std::to_string(header.get());
+    execute(arguments, header.get());
 }
 
 } // namespace
@@ -343,6 +525,9 @@ std::vector<std::string> format_luks2_arguments(const DiskPlanOptions& options) 
         "--key-size", "512", "--hash", "sha512", "--pbkdf", "argon2id", "--iter-time",
         std::to_string(options.iter_time_ms), "--sector-size", std::to_string(options.sector_size), "--use-random",
     };
+
+    if (!options.key_file) arguments.push_back("--verify-passphrase");
+
     if (options.argon2_memory_kib) {
         arguments.insert(arguments.end(), {"--pbkdf-memory", std::to_string(*options.argon2_memory_kib)});
     }
@@ -355,6 +540,7 @@ std::vector<std::string> format_luks2_arguments(const DiskPlanOptions& options) 
     if (options.integrity) {
         arguments.insert(arguments.end(), {"--integrity", *options.integrity});
     }
+    arguments.push_back("--");
     arguments.push_back(options.device);
     if (options.key_file) {
         arguments.push_back(*options.key_file);
@@ -416,35 +602,57 @@ std::string shell_quote(const std::string& value) {
 }
 
 Luks2Plan build_luks2_plan(const DiskPlanOptions& options) {
-    if (!executable_in_path("cryptsetup")) {
-        throw EnvelopeError("cryptsetup is not installed");
-    }
+    const auto cryptsetup = detail::trusted_disk_executable("cryptsetup");
     validate_options(options);
     const DeviceIdentity device = validate_device(options.device);
+
     Luks2Plan plan;
     plan.options_ = options;
     plan.options_.device = device.canonical_path;
     plan.device_ = device.canonical_path;
     plan.major_ = device.major;
     plan.minor_ = device.minor;
+    if (options.action != DiskAction::Format && options.action != DiskAction::Open &&
+        options.action != DiskAction::Close) {
+        throw EnvelopeError("invalid disk action");
+    }
+
+    if (options.header_file) {
+        if (options.action == DiskAction::Close) throw EnvelopeError("close does not accept a header file");
+
+        plan.header_identity_ = detail::header_identity(*options.header_file, options.action == DiskAction::Format);
+    }
+
     plan.format_args_ = format_luks2_arguments(plan.options_);
-    plan.open_args_ = {"cryptsetup", "open", "--type", "luks2", "--batch-mode"};
+    plan.format_args_.front() = cryptsetup;
+
+    plan.open_args_ = {cryptsetup, "open", "--type", "luks2", "--batch-mode"};
     if (plan.options_.header_file) {
         plan.open_args_.insert(plan.open_args_.end(), {"--header", *plan.options_.header_file});
     }
-    plan.open_args_.insert(plan.open_args_.end(), {plan.device_, plan.options_.mapper_name});
     if (plan.options_.key_file) {
         plan.open_args_.insert(plan.open_args_.end(), {"--key-file", *plan.options_.key_file});
     }
-    plan.close_args_ = {"cryptsetup", "close", plan.options_.mapper_name};
-    plan.confirmation_ = format_confirmation(plan.format_args_,
+    plan.open_args_.insert(plan.open_args_.end(), {"--", plan.device_, plan.options_.mapper_name});
+    plan.close_args_ = {cryptsetup, "close", "--", plan.options_.mapper_name};
+
+    auto confirmation_material = plan.format_args_;
+    if (options.header_file) confirmation_material.push_back(plan.header_identity_);
+
+    plan.confirmation_ = format_confirmation(confirmation_material,
         std::filesystem::path(plan.device_).filename().string(), device.major, device.minor);
     plan.validated_ = true;
     return plan;
 }
 
 std::vector<std::string> Luks2Plan::backup_header_args(const std::string& path) const {
-    std::vector<std::string> arguments{"cryptsetup", "luksHeaderBackup", device_};
+    if (!validated_) throw EnvelopeError("backup preview requires a validated plan");
+    detail::header_identity(path, true);
+    if (options_.header_file && std::filesystem::path(path) == std::filesystem::path(*options_.header_file)) {
+        throw EnvelopeError("backup and detached header paths must differ");
+    }
+
+    std::vector<std::string> arguments{format_args_.front(), "luksHeaderBackup", device_};
     if (options_.header_file) {
         arguments.insert(arguments.end(), {"--header", *options_.header_file});
     }
@@ -478,27 +686,42 @@ std::string disk_profile_json() {
 }
 
 void execute_luks2_format(const Luks2Plan& plan, const std::string& confirmation) {
+    if (plan.options_.action != DiskAction::Format) throw EnvelopeError("format requires a format plan");
+
     validate_luks2_plan_internal(plan);
     if (confirmation != plan.confirmation_) {
         throw EnvelopeError("destructive operation refused; pass the exact confirmation from the reviewed plan");
     }
     validate_format_target_unused_internal(plan);
-    execute(plan.format_args_);
+    execute_with_header(plan.format_args_, plan.options_, plan.header_identity_);
 }
 
 void execute_luks2_open(const Luks2Plan& plan) {
+    if (plan.options_.action != DiskAction::Open) throw EnvelopeError("open requires an open plan");
+
     validate_luks2_plan_internal(plan);
     if (std::filesystem::exists(std::filesystem::path("/dev/mapper") / plan.options_.mapper_name)) {
         throw EnvelopeError("requested mapper name is already active");
     }
-    execute(plan.open_args_);
+    execute_with_header(plan.open_args_, plan.options_, plan.header_identity_);
 }
 
 void execute_luks2_close(const Luks2Plan& plan) {
-    if (!plan.validated_) {
-        throw EnvelopeError("operation requires a validated plan from build_luks2_plan");
-    }
-    execute(plan.close_args_);
+    if (plan.options_.action != DiskAction::Close) throw EnvelopeError("close requires a close plan");
+
+    validate_luks2_plan_internal(plan);
+    const auto mapping_path = (std::filesystem::path("/dev/mapper") / plan.options_.mapper_name).string();
+    const auto mapping = validate_device(mapping_path);
+
+    detail::validate_mapping_device("/sys/dev/block", mapping.major, mapping.minor, plan.major_, plan.minor_);
+
+    const auto current = validate_device(mapping_path);
+    if (current.canonical_path != mapping.canonical_path || current.major != mapping.major ||
+        current.minor != mapping.minor) throw EnvelopeError("mapping changed before close");
+
+    auto arguments = plan.close_args_;
+    arguments.back() = mapping.canonical_path;
+    execute(arguments);
 }
 
 } // namespace qprotect::cpp

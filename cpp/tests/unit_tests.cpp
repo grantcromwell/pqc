@@ -24,10 +24,12 @@
 #include <openssl/x509.h>
 
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -831,8 +833,8 @@ void test_disk_plan_helpers() {
     CHECK(arguments.front() == "cryptsetup");
     CHECK(arguments[1] == "luksFormat");
     CHECK(arguments.back() == "/dev/example");
-    CHECK(qprotect::cpp::format_confirmation(arguments, "example", 8, 1) ==
-          "FORMAT-example-05A0BBE818CD0BF5");
+    CHECK(std::find(arguments.begin(), arguments.end(), "--verify-passphrase") != arguments.end());
+    CHECK(qprotect::cpp::format_confirmation(arguments, "example", 8, 1).starts_with("FORMAT-example-"));
     CHECK(qprotect::cpp::format_confirmation(arguments, "example", 8, 1) !=
           qprotect::cpp::format_confirmation(arguments, "example", 8, 2));
     CHECK(qprotect::cpp::shell_quote("a'b") == "'a'\\''b'");
@@ -841,6 +843,159 @@ void test_disk_plan_helpers() {
     options.mapper_name = "valid";
     options.iter_time_ms = 999;
     CHECK_THROWS(EnvelopeError, qprotect::cpp::format_luks2_arguments(options));
+
+    options.iter_time_ms = 5000;
+    for (const std::string name : {"--help", ".", ".."}) {
+        options.mapper_name = name;
+        CHECK_THROWS(EnvelopeError, qprotect::cpp::format_luks2_arguments(options));
+    }
+
+    options.mapper_name = "valid";
+    for (int parallelism : {0, 5, 1024}) {
+        options.argon2_parallelism = parallelism;
+        CHECK_THROWS(EnvelopeError, qprotect::cpp::format_luks2_arguments(options));
+    }
+
+    options.argon2_parallelism = 4;
+    options.argon2_memory_kib = 31;
+    CHECK_THROWS(EnvelopeError, qprotect::cpp::format_luks2_arguments(options));
+
+    options.argon2_memory_kib = 32;
+    CHECK_NO_THROW(qprotect::cpp::format_luks2_arguments(options));
+
+    const auto changed = qprotect::cpp::format_luks2_arguments(options);
+    CHECK(qprotect::cpp::format_confirmation(arguments, "example", 8, 1) !=
+          qprotect::cpp::format_confirmation(changed, "example", 8, 1));
+
+    const qprotect::cpp::Luks2Plan unvalidated;
+    CHECK_THROWS(EnvelopeError, qprotect::cpp::execute_luks2_format(unvalidated, ""));
+    CHECK_THROWS(EnvelopeError, qprotect::cpp::execute_luks2_open(unvalidated));
+    CHECK_THROWS(EnvelopeError, qprotect::cpp::execute_luks2_close(unvalidated));
+}
+
+void test_disk_header_and_mapping_validation() {
+    namespace fs = std::filesystem;
+    using qprotect::cpp::detail::header_identity;
+    using qprotect::cpp::detail::open_validated_header;
+    using qprotect::cpp::detail::validate_mapping_device;
+
+    std::string directory_template = (fs::canonical(fs::current_path()) / "disk-validation-XXXXXX").string();
+    const char* created = ::mkdtemp(directory_template.data());
+    if (created == nullptr) throw EnvelopeError("unable to create disk test directory");
+
+    const fs::path root(created);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code error; fs::remove_all(path, error); }
+    } cleanup{root};
+
+    const auto header = root / "header";
+    const auto identity = header_identity(header.string(), true);
+    CHECK(!fs::exists(header));
+    CHECK_THROWS(EnvelopeError, header_identity("relative-header", true));
+
+    const int descriptor = open_validated_header(header.string(), true, identity);
+    struct stat status {};
+    CHECK(::fstat(descriptor, &status) == 0 && status.st_size == 32 * 1024 * 1024 &&
+          (status.st_mode & 0777) == 0600);
+    CHECK(::close(descriptor) == 0);
+
+    CHECK_THROWS(EnvelopeError, open_validated_header(header.string(), true, identity));
+    const auto existing = header_identity(header.string(), false);
+    const int opened = open_validated_header(header.string(), false, existing);
+    CHECK(opened >= 0);
+
+    fs::rename(header, root / "old-header");
+    { std::ofstream file(header); file << "replacement"; }
+    CHECK(::chmod(header.c_str(), 0600) == 0);
+    CHECK_THROWS(EnvelopeError, open_validated_header(header.string(), false, existing));
+    CHECK(::fstat(opened, &status) == 0 && status.st_size == 32 * 1024 * 1024);
+    CHECK(::close(opened) == 0);
+
+    qprotect::cpp::DiskPlanOptions options;
+    options.device = "/dev/example";
+    options.mapper_name = "fixture";
+    options.key_file = header.string();
+    const auto arguments = qprotect::cpp::format_luks2_arguments(options);
+    CHECK(std::find(arguments.begin(), arguments.end(), "--verify-passphrase") == arguments.end());
+    CHECK(arguments.back() == header.string());
+
+    CHECK(::chmod(header.c_str(), 0644) == 0);
+    CHECK_THROWS(EnvelopeError, header_identity(header.string(), false));
+    CHECK(::chmod(header.c_str(), 0600) == 0);
+
+    fs::create_symlink(header, root / "linked-header");
+    CHECK_THROWS(EnvelopeError, header_identity((root / "linked-header").string(), true));
+    CHECK_THROWS(EnvelopeError, header_identity((root / "linked-header").string(), false));
+
+    fs::create_hard_link(header, root / "hard-header");
+    CHECK_THROWS(EnvelopeError, header_identity(header.string(), false));
+    fs::remove(root / "hard-header");
+
+    CHECK(::mkfifo((root / "fifo-header").c_str(), 0600) == 0);
+    CHECK_THROWS(EnvelopeError, header_identity((root / "fifo-header").string(), false));
+
+    CHECK(::chmod(root.c_str(), 0777) == 0);
+    CHECK_THROWS(EnvelopeError, header_identity((root / "new-header").string(), true));
+    CHECK(::chmod(root.c_str(), 0700) == 0);
+
+    const auto parent = root / "parent";
+    fs::create_directory(parent);
+    CHECK(::chmod(parent.c_str(), 0700) == 0);
+    const auto parent_identity = header_identity((parent / "header").string(), true);
+    fs::rename(parent, root / "old-parent");
+    fs::create_directory(parent);
+    CHECK_THROWS(EnvelopeError, open_validated_header((parent / "header").string(), true, parent_identity));
+
+    const auto sysfs = root / "sysfs";
+    fs::create_directories(sysfs / "253:0" / "dm");
+    fs::create_directories(sysfs / "253:0" / "slaves" / "child");
+    const auto write = [](const fs::path& path, const std::string& value) { std::ofstream(path) << value; };
+
+    write(sysfs / "253:0" / "dm" / "uuid", "CRYPT-LUKS2-fixture\n");
+    write(sysfs / "253:0" / "slaves" / "child" / "dev", "8:1\n");
+    CHECK_NO_THROW(validate_mapping_device(sysfs, 253, 0, 8, 1));
+    CHECK_THROWS(EnvelopeError, validate_mapping_device(sysfs, 253, 0, 8, 2));
+
+    fs::create_directories(sysfs / "253:0" / "slaves" / "extra");
+    write(sysfs / "253:0" / "slaves" / "extra" / "dev", "8:2\n");
+    CHECK_THROWS(EnvelopeError, validate_mapping_device(sysfs, 253, 0, 8, 1));
+    fs::remove_all(sysfs / "253:0" / "slaves" / "extra");
+
+    write(sysfs / "253:0" / "dm" / "uuid", "unrelated-mapping\n");
+    CHECK_THROWS(EnvelopeError, validate_mapping_device(sysfs, 253, 0, 8, 1));
+    write(sysfs / "253:0" / "dm" / "uuid", "CRYPT-LUKS2-fixture\n");
+
+    fs::create_directories(sysfs / "253:1" / "slaves" / "child");
+    write(sysfs / "253:0" / "slaves" / "child" / "dev", "253:1\n");
+    write(sysfs / "253:1" / "slaves" / "child" / "dev", "8:1\n");
+    CHECK_NO_THROW(validate_mapping_device(sysfs, 253, 0, 8, 1));
+
+    write(sysfs / "253:1" / "slaves" / "child" / "dev", "253:0\n");
+    CHECK_THROWS(EnvelopeError, validate_mapping_device(sysfs, 253, 0, 8, 1));
+
+    CHECK_THROWS(EnvelopeError, qprotect::cpp::detail::trusted_disk_executable("sh"));
+
+    const auto resolve = [](const std::string& name) {
+        try { return qprotect::cpp::detail::trusted_disk_executable(name); }
+        catch (const EnvelopeError&) { return std::string{}; }
+    };
+    const auto cryptsetup = resolve("cryptsetup");
+    const auto lsblk = resolve("lsblk");
+    const char* environment_path = std::getenv("PATH");
+    const std::optional<std::string> old_path = environment_path ?
+        std::optional<std::string>(environment_path) : std::nullopt;
+
+    write(root / "cryptsetup", "untrusted executable");
+    CHECK(::chmod((root / "cryptsetup").c_str(), 0700) == 0);
+    CHECK(::setenv("PATH", root.c_str(), 1) == 0);
+    CHECK(resolve("cryptsetup") == cryptsetup);
+    CHECK(resolve("lsblk") == lsblk);
+
+    if (old_path) CHECK(::setenv("PATH", old_path->c_str(), 1) == 0);
+    else CHECK(::unsetenv("PATH") == 0);
+
+    fs::remove_all(root);
 }
 
 void test_disk_safety_report_validation() {
@@ -1058,6 +1213,7 @@ int main() {
         test_key_files(context);
         test_private_key_envelopes(context);
         test_disk_plan_helpers();
+        test_disk_header_and_mapping_validation();
         test_disk_safety_report_validation();
         test_hardware_fixture_discovery();
     } catch (const std::exception& error) {

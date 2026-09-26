@@ -137,6 +137,26 @@ int main(int argc, char** argv) {
                     "private key file permissions");
     passed &= check(run({tool, "disk", "plan", "--device", "/dev/null", "--mapper", "integration-test"}) != 0,
                     "disk planner rejects a non-block device");
+
+    for (const std::string value : {"invalid", "4096junk", "", "999999999999999999999999", "0", "-1"}) {
+        const auto output = path("disk-arguments.log");
+        passed &= check(run({tool, "disk", "plan", "--sector-size", value}, output.string()) == 2 &&
+                        read_file(output).find("invalid value for --sector-size") != std::string::npos,
+                        "disk numeric input is rejected without aborting");
+    }
+
+    for (const std::string option : {"--pbkdf-parallel", "--pbkdf-memory"}) {
+        passed &= check(run({tool, "disk", "plan", option, "0"}, path("disk-arguments.log").string()) == 2,
+                        "explicit zero does not select a PBKDF default");
+    }
+
+    for (const std::string action : {"format", "open", "close"}) {
+        const auto output = path("disk-backup.log");
+        passed &= check(run({tool, "disk", action, "--header-backup", path("backup").string()},
+                            output.string()) != 0 && read_file(output).find("plan-only preview") != std::string::npos,
+                        "disk execution rejects the preview-only backup option");
+    }
+
     std::error_code cleanup_error;
     std::filesystem::remove_all(root, cleanup_error);
     return passed && !cleanup_error ? 0 : 1;

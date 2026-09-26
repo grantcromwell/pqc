@@ -16,6 +16,7 @@
 #include "secure_file.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -56,10 +57,11 @@ struct Arguments {
     std::string disk_confirmation;
     std::string hardware_action;
     int disk_iter_time = 5000;
-    int disk_argon_memory = 0;
-    int disk_argon_parallelism = 0;
+    std::optional<int> disk_argon_memory;
+    std::optional<int> disk_argon_parallelism;
     int disk_sector_size = 4096;
     bool disk_execute = false;
+    bool disk_format_options = false;
 };
 
 void usage(std::ostream& out) {
@@ -82,6 +84,8 @@ void usage(std::ostream& out) {
         << "           [--signer-public PUBPEM]\n"
         << "  disk plan|format|open|close --device PATH --mapper NAME [options]\n"
         << "           format requires --execute --confirmation TOKEN\n"
+        << "           --header PATH uses a new private file for format, an existing file for open\n"
+        << "           --header-backup PATH is a plan-only preview for backing up the new header\n"
         << "  hardware doctor          read-only dynamic platform inventory\n"
         << "\n"
         << "options:\n"
@@ -201,6 +205,21 @@ bool parse_arguments(int argc, char* argv[], Arguments& args) {
             }
             return argv[++i];
         };
+
+        const auto integer = [&](int minimum, int maximum) {
+            const std::string input = value();
+            int parsed = 0;
+            const auto result = std::from_chars(input.data(), input.data() + input.size(), parsed);
+
+            if (result.ec != std::errc{} || result.ptr != input.data() + input.size() ||
+                parsed < minimum || parsed > maximum) {
+                throw std::string("invalid value for ") + argument;
+            }
+
+            args.disk_format_options = true;
+            return parsed;
+        };
+
         try {
             if (argument == "--provider") {
                 args.provider = value();
@@ -238,16 +257,17 @@ bool parse_arguments(int argc, char* argv[], Arguments& args) {
                 args.disk_backup_file = value();
             } else if (argument == "--integrity") {
                 args.disk_integrity = value();
+                args.disk_format_options = true;
             } else if (argument == "--confirmation") {
                 args.disk_confirmation = value();
             } else if (argument == "--iter-time") {
-                args.disk_iter_time = std::stoi(value());
+                args.disk_iter_time = integer(1000, 10000);
             } else if (argument == "--pbkdf-memory") {
-                args.disk_argon_memory = std::stoi(value());
+                args.disk_argon_memory = integer(32, 4194304);
             } else if (argument == "--pbkdf-parallel") {
-                args.disk_argon_parallelism = std::stoi(value());
+                args.disk_argon_parallelism = integer(1, 4);
             } else if (argument == "--sector-size") {
-                args.disk_sector_size = std::stoi(value());
+                args.disk_sector_size = integer(512, 4096);
             } else if (argument == "--execute") {
                 args.disk_execute = true;
             } else {
@@ -566,18 +586,34 @@ int run_disk(const Arguments& args) {
         std::cerr << "error: disk action must be plan, format, open, or close\n";
         return 2;
     }
+
+    if (!args.disk_backup_file.empty() && args.disk_action != "plan") {
+        throw EnvelopeError("--header-backup is a plan-only preview; no backup has been executed");
+    }
+
+    if ((args.disk_action == "open" || args.disk_action == "close") && args.disk_format_options) {
+        throw EnvelopeError("format options are not accepted by open or close");
+    }
+
+    if (args.disk_action == "close" && (!args.disk_header_file.empty() || !args.disk_key_file.empty())) {
+        throw EnvelopeError("close does not accept a header or key file");
+    }
+
     if (args.disk_device.empty() || args.disk_mapper.empty()) {
         std::cerr << "error: disk requires --device and --mapper\n";
         return 2;
     }
     qprotect::cpp::DiskPlanOptions options;
+    if (args.disk_action == "open") options.action = qprotect::cpp::DiskAction::Open;
+    if (args.disk_action == "close") options.action = qprotect::cpp::DiskAction::Close;
+
     options.device = args.disk_device;
     options.mapper_name = args.disk_mapper;
     if (!args.disk_key_file.empty()) options.key_file = args.disk_key_file;
     if (!args.disk_header_file.empty()) options.header_file = args.disk_header_file;
     options.iter_time_ms = args.disk_iter_time;
-    if (args.disk_argon_memory != 0) options.argon2_memory_kib = args.disk_argon_memory;
-    if (args.disk_argon_parallelism != 0) options.argon2_parallelism = args.disk_argon_parallelism;
+    options.argon2_memory_kib = args.disk_argon_memory;
+    options.argon2_parallelism = args.disk_argon_parallelism;
     options.sector_size = args.disk_sector_size;
     if (!args.disk_integrity.empty()) options.integrity = args.disk_integrity;
     const auto plan = qprotect::cpp::build_luks2_plan(options);
@@ -598,7 +634,8 @@ int run_disk(const Arguments& args) {
     }
     const auto commands = qprotect::cpp::disk_command_strings(
         plan, args.disk_backup_file.empty() ? std::nullopt : std::optional<std::string>(args.disk_backup_file));
-    std::cout << "{\"device\":\"" << json_escape(plan.device()) << "\",\"profile\":"
+    std::cout << "{\"commands_are_previews\":true,\"header_backup_scope\":\"new_header_after_format\","
+              << "\"device\":\"" << json_escape(plan.device()) << "\",\"profile\":"
               << qprotect::cpp::disk_profile_json() << ",\"confirmation\":\""
               << plan.confirmation() << "\",\"commands\":[";
     for (std::size_t index = 0; index < commands.size(); ++index) {

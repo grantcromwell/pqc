@@ -6,7 +6,11 @@
 
 namespace qprotect::cpp {
 
+enum class DiskAction { Format, Open, Close };
+
 struct DiskPlanOptions {
+    DiskAction action = DiskAction::Format;
+
     std::string device;
     std::string mapper_name;
     std::optional<std::string> key_file;
@@ -44,6 +48,8 @@ private:
     std::vector<std::string> open_args_;
     std::vector<std::string> close_args_;
     std::string confirmation_;
+    std::string header_identity_;
+
     bool validated_ = false;
 };
 
